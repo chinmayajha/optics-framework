@@ -262,3 +262,20 @@ def test_bboxes_are_in_page_coordinates_inside_an_iframe():
     assert (out_x, out_y) == (10, 10)
     assert (in_x, in_y) == (210, 110)
     assert missing is None
+
+
+def test_screenshots_stay_in_css_pixels_on_a_high_density_browser():
+    from optics_framework.engines.drivers.playwright import Playwright
+    from optics_framework.engines.elementsources.playwright_screenshot import PlaywrightScreenshot
+
+    driver = Playwright({"capabilities": {"headless": True}})
+    driver.launch_app()
+    try:
+        driver.page = driver.run(
+            driver.run(driver._browser.new_context(viewport={"width": 400, "height": 300}, device_scale_factor=2)).new_page()
+        )
+        shot = PlaywrightScreenshot(driver=driver).capture()
+    finally:
+        driver.terminate()
+
+    assert shot.shape[:2] == (300, 400)
