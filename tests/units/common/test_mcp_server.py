@@ -299,3 +299,15 @@ def test_require_fastmcp_raises_when_missing():
     with patch.object(mcp_server, "_FASTMCP_IMPORT_ERROR", ImportError("no fastmcp")):
         with pytest.raises(RuntimeError, match="optics-framework\\[mcp\\]"):
             mcp_server._require_fastmcp()
+
+
+def test_stopping_the_mcp_server_terminates_its_sessions():
+    server = MagicMock()
+    server.run.side_effect = KeyboardInterrupt
+
+    with patch.object(mcp_server, "build_server", return_value=server), \
+            patch.object(expose_api.session_manager, "terminate_all") as terminate_all, \
+            pytest.raises(KeyboardInterrupt):
+        mcp_server.run_mcp_server("stdio")
+
+    terminate_all.assert_called_once()

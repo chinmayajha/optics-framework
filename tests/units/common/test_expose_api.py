@@ -932,3 +932,78 @@ class TestRemoteBrowserSecrets:
         assert "pw" not in logged
         assert "wss://grid.example.com/cdp" in logged
         assert '"X-Api-Key": "***"' in logged
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        ["${data}", "ENV:SECRET_NAME"],
+        ["${data}", ["ENV:SECRET_NAME", "other.csv"]],
+        {"input_element": "${data}", "file_path": " env:SECRET_NAME"},
+    ],
+)
+def test_execute_keyword_refuses_read_data_from_server_env(client, params):
+    session = _fake_action_session()
+    fake_registry = _FakeRegistry()
+    fake_registry.keyword_map = {"read_data": MagicMock()}
+    engine = MagicMock()
+    engine.execute = AsyncMock(return_value=["server-secret"])
+
+    with patch.object(expose_api.session_manager, "get_session", return_value=session), \
+            patch.object(expose_api, "KeywordRegistry", return_value=fake_registry), \
+            patch.object(expose_api, "FlowControl", return_value=MagicMock()), \
+            patch.object(expose_api, "ExecutionEngine", return_value=engine):
+        resp = client.post(
+            "/v1/sessions/s1/action",
+            json={"mode": "keyword", "keyword": "Read Data", "params": params},
+        )
+
+    assert resp.status_code >= 400
+    engine.execute.assert_not_called()
+
+
+def test_execute_keyword_still_allows_read_data_from_a_file(client):
+    session = _fake_action_session()
+    fake_registry = _FakeRegistry()
+    fake_registry.keyword_map = {"read_data": MagicMock()}
+    engine = MagicMock()
+    engine.execute = AsyncMock(return_value=[["a"]])
+
+    with patch.object(expose_api.session_manager, "get_session", return_value=session), \
+            patch.object(expose_api, "KeywordRegistry", return_value=fake_registry), \
+            patch.object(expose_api, "FlowControl", return_value=MagicMock()), \
+            patch.object(expose_api, "ExecutionEngine", return_value=engine):
+        resp = client.post(
+            "/v1/sessions/s1/action",
+            json={"mode": "keyword", "keyword": "Read Data", "params": ["${data}", "data.csv"]},
+        )
+
+    assert resp.status_code == 200
+
+
+def test_stopping_the_server_terminates_every_session(client):
+    manager = expose_api.session_manager
+    drivers = [MagicMock(), MagicMock()]
+    sessions = {f"s{i}": MagicMock(driver=driver, _inline_templates_dir=None) for i, driver in enumerate(drivers)}
+
+    with patch.object(manager, "sessions", sessions), \
+            patch("optics_framework.common.session_manager.cleanup_junit"), \
+            patch("optics_framework.common.session_manager.get_event_manager_registry"):
+        with TestClient(expose_api.app):
+            pass
+
+    for driver in drivers:
+        driver.terminate.assert_called_once()
+
+
+def test_one_session_failing_to_close_does_not_spare_the_rest():
+    manager = expose_api.SessionManager()
+    stuck, healthy = MagicMock(_inline_templates_dir=None), MagicMock(_inline_templates_dir=None)
+    stuck.driver.terminate.side_effect = RuntimeError("hub unreachable")
+    manager.sessions = {"stuck": stuck, "healthy": healthy}
+
+    with patch("optics_framework.common.session_manager.cleanup_junit"), \
+            patch("optics_framework.common.session_manager.get_event_manager_registry"):
+        manager.terminate_all()
+
+    healthy.driver.terminate.assert_called_once()

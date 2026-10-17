@@ -331,6 +331,14 @@ class TestPlaywrightScreenshotBytes:
         src = pw.PlaywrightScreenshot(driver=SimpleNamespace(page=page, run=lambda coro: coro))
         assert src.capture_screenshot_bytes() == png
 
+    def test_is_taken_at_css_scale_so_hits_are_clickable(self):
+        pytest.importorskip("playwright")
+        import optics_framework.engines.elementsources.playwright_screenshot as pw
+        page = MagicMock()
+        src = pw.PlaywrightScreenshot(driver=SimpleNamespace(page=page, run=lambda coro: coro))
+        src.capture_screenshot_bytes()
+        page.screenshot.assert_called_once_with(full_page=False, scale="css")
+
 
 # --- StrategyManager.assert_visibility() vs assert_presence() (shared _assert helper) ---
 

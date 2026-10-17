@@ -24,7 +24,6 @@ driver_sources:
       capabilities:
         browser: chromium
         headless: false
-        slow_mo: 300
 
 # --------------------------------------------------
 # Element sources

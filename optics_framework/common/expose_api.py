@@ -13,6 +13,7 @@ import pkgutil
 import asyncio
 import warnings
 import hashlib
+from contextlib import asynccontextmanager
 from itertools import product
 from typing import Annotated, Optional, Dict, Any, List, Union, cast, Callable, Tuple, NamedTuple
 from fastapi import FastAPI, HTTPException, Query, Body
@@ -35,8 +36,18 @@ from optics_framework.api import ActionKeyword, AppManagement, FlowControl, Veri
 from optics_framework.helper.execute import discover_templates
 from optics_framework.helper.version import VERSION
 
-app = FastAPI(title="Optics Framework API", version="1.0")
 session_manager = SessionManager()
+
+
+@asynccontextmanager
+async def _end_sessions_on_shutdown(_app: FastAPI):
+    """Close every driver when the server stops, so remote browsers and device sessions
+    are released now rather than whenever their provider's idle timeout fires."""
+    yield
+    await asyncio.to_thread(session_manager.terminate_all)
+
+
+app = FastAPI(title="Optics Framework API", version="1.0", lifespan=_end_sessions_on_shutdown)
 
 # Store last workspace hash per session for change detection
 workspace_hashes: Dict[str, str] = {}
@@ -816,6 +827,21 @@ async def _try_combos_positional(
     raise_fallback_failure(f"keyword '{keyword}'", errors)
 
 
+def _reject_server_env_read(keyword_slug: str, params: Any) -> None:
+    """Refuse ``Read Data`` ``ENV:NAME``: the server has no caller authentication, so
+    honouring it would return any server environment variable to whoever asks."""
+    values = params.values() if isinstance(params, dict) else params
+    candidates = [
+        item
+        for value in values
+        for item in (value if isinstance(value, list) else [value])
+    ]
+    if keyword_slug == "read_data" and any(
+        isinstance(item, str) and item.strip().upper().startswith("ENV:") for item in candidates
+    ):
+        raise OpticsError(Code.E0501, "Read Data ENV: is only available to project runs, not API callers")
+
+
 async def _execute_keyword_with_fallback(
     engine: ExecutionEngine,
     session_id: str,
@@ -942,6 +968,7 @@ async def execute_keyword(session_id: str, request: ExecuteRequest):
 
         if not method:
             raise OpticsError(Code.E0402, message=f"Keyword {request.keyword} not found")
+        _reject_server_env_read(keyword_slug, request.params)
 
         result = await _execute_keyword_with_fallback(
             engine, session_id, request.keyword, request.params, method, session
