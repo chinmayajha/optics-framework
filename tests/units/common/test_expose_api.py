@@ -979,3 +979,31 @@ def test_execute_keyword_still_allows_read_data_from_a_file(client):
         )
 
     assert resp.status_code == 200
+
+
+def test_stopping_the_server_terminates_every_session(client):
+    manager = expose_api.session_manager
+    drivers = [MagicMock(), MagicMock()]
+    sessions = {f"s{i}": MagicMock(driver=driver, _inline_templates_dir=None) for i, driver in enumerate(drivers)}
+
+    with patch.object(manager, "sessions", sessions), \
+            patch("optics_framework.common.session_manager.cleanup_junit"), \
+            patch("optics_framework.common.session_manager.get_event_manager_registry"):
+        with TestClient(expose_api.app):
+            pass
+
+    for driver in drivers:
+        driver.terminate.assert_called_once()
+
+
+def test_one_session_failing_to_close_does_not_spare_the_rest():
+    manager = expose_api.SessionManager()
+    stuck, healthy = MagicMock(_inline_templates_dir=None), MagicMock(_inline_templates_dir=None)
+    stuck.driver.terminate.side_effect = RuntimeError("hub unreachable")
+    manager.sessions = {"stuck": stuck, "healthy": healthy}
+
+    with patch("optics_framework.common.session_manager.cleanup_junit"), \
+            patch("optics_framework.common.session_manager.get_event_manager_registry"):
+        manager.terminate_all()
+
+    healthy.driver.terminate.assert_called_once()

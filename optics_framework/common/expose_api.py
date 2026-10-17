@@ -13,6 +13,7 @@ import pkgutil
 import asyncio
 import warnings
 import hashlib
+from contextlib import asynccontextmanager
 from itertools import product
 from typing import Annotated, Optional, Dict, Any, List, Union, cast, Callable, Tuple, NamedTuple
 from fastapi import FastAPI, HTTPException, Query, Body
@@ -35,8 +36,18 @@ from optics_framework.api import ActionKeyword, AppManagement, FlowControl, Veri
 from optics_framework.helper.execute import discover_templates
 from optics_framework.helper.version import VERSION
 
-app = FastAPI(title="Optics Framework API", version="1.0")
 session_manager = SessionManager()
+
+
+@asynccontextmanager
+async def _end_sessions_on_shutdown(_app: FastAPI):
+    """Close every driver when the server stops, so remote browsers and device sessions
+    are released now rather than whenever their provider's idle timeout fires."""
+    yield
+    await asyncio.to_thread(session_manager.terminate_all)
+
+
+app = FastAPI(title="Optics Framework API", version="1.0", lifespan=_end_sessions_on_shutdown)
 
 # Store last workspace hash per session for change detection
 workspace_hashes: Dict[str, str] = {}
