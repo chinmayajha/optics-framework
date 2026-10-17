@@ -279,6 +279,38 @@ class TestCheckWeb:
         assert pw.status == "warn"
         assert "playwright install chromium" in pw.hint
 
+    def test_a_remote_playwright_browser_needs_no_local_download(self, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda _: None)
+        with patch(f"{MODULE}.version", return_value="1.49.0"):
+            rows = doctor.check_web(playwright_remote=True)
+        pw = next(r for r in rows if r.name == "playwright browser")
+        assert pw.status == "ok"
+
+    def test_a_remote_browser_still_needs_the_playwright_package(self, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda _: None)
+        with patch(f"{MODULE}.version", side_effect=PackageNotFoundError):
+            rows = doctor.check_web(playwright_remote=True)
+        pw = next(r for r in rows if r.name == "playwright browser")
+        assert pw.status == "warn"
+
+    def test_remote_is_detected_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv("OPTICS_PLAYWRIGHT_REMOTE", '{"url": "wss://grid.example.com"}')
+        assert doctor._playwright_is_remote(None) is True
+
+    def test_remote_is_detected_from_an_enabled_driver_url(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("OPTICS_PLAYWRIGHT_REMOTE", raising=False)
+        (tmp_path / "config.yaml").write_text(
+            "driver_sources:\n  - playwright:\n      enabled: true\n      url: wss://grid.example.com\n"
+        )
+        assert doctor._playwright_is_remote(str(tmp_path)) is True
+
+    def test_a_local_playwright_project_is_not_remote(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("OPTICS_PLAYWRIGHT_REMOTE", raising=False)
+        (tmp_path / "config.yaml").write_text(
+            "driver_sources:\n  - playwright:\n      enabled: true\n      url: null\n"
+        )
+        assert doctor._playwright_is_remote(str(tmp_path)) is False
+
     def test_selenium_with_driver_on_path_is_ok(self, monkeypatch):
         monkeypatch.setattr(doctor.shutil, "which",
                             lambda name: "/usr/bin/chromedriver" if name == "chromedriver" else None)
@@ -481,7 +513,7 @@ class TestRunDoctor:
         """Replace every environment probe with one canned warning row."""
         monkeypatch.setattr(doctor, "check_core", _stub_env_rows)
         monkeypatch.setattr(doctor, "check_engines", lambda: [])
-        monkeypatch.setattr(doctor, "check_web", lambda: [])
+        monkeypatch.setattr(doctor, "check_web", lambda *_: [])
         captured = {}
 
         def fake_check_mobile(host="127.0.0.1", port=4723):
