@@ -15,6 +15,8 @@ from optics_framework.common.session_manager import Session
 from optics_framework.common.error import OpticsError, Code
 from optics_framework.common.config_handler import Config, ConfigHandler
 from optics_framework.common.logging_config import (
+    mask_secrets,
+    use_secrets,
     internal_logger,
     execution_logger,
     LogCaptureBuffer,
@@ -58,6 +60,20 @@ class Runner:
     keyword_map: Dict[str, Callable[..., Any]]
     apis: ApiData
     elements: ElementData
+    def _resolve_candidate_params(self, method, candidate_args):
+        candidate_args = utils.substitute_inline(method, list(candidate_args), self.elements)
+        positional_params, kw_params = DataReader.split_params_by_signature(
+            method, candidate_args)
+        raw = utils.raw_param_indices(method)
+        resolved_positional_params = utils.unescape_vars(method, [
+            param if i in raw else self.resolve_param(param) for i, param in enumerate(positional_params)
+        ])
+        resolved_kw_params = {}
+        for key, value in kw_params.items():
+            if value.startswith("${") and value.endswith("}"):
+                value = self.resolve_param(value)
+            resolved_kw_params[key] = value
+        return resolved_positional_params, resolved_kw_params
 
     def execute_test_case(self, test_case: str) -> Optional[TestCaseResult]:
         """Empty implementation to satisfy the interface contract.
@@ -111,6 +127,7 @@ class TestRunner(Runner):
         self.elements = self.session.elements if self.session.elements is not None else ElementData()
         self.apis = self.session.apis if self.session.apis is not None else ApiData()
         self.keyword_map = keyword_map
+        self._failed_steps_elements: List[dict] = []
         self.result_printer = result_printer
         self.config = session.config
         self.event_manager = event_manager
@@ -158,7 +175,7 @@ class TestRunner(Runner):
                 resolved_params = [
                     self._safe_resolve_param(param) for param in current_keyword.params
                 ]
-                resolved_name = (
+                resolved_name = mask_secrets(
                     f"{current_keyword.name} ({', '.join(str(p) for p in resolved_params)})"
                     if resolved_params
                     else current_keyword.name
@@ -308,6 +325,7 @@ class TestRunner(Runner):
         end_time: Optional[float] = None,
         elapsed: Optional[float] = None,
         logs: Optional[List[logging.LogRecord]] = None,
+        stored: dict[str, str] | None = None,
     ) -> None:
         log_messages = None
         if logs is not None:
@@ -324,7 +342,7 @@ class TestRunner(Runner):
             status=status,
             message=reason or "",
             parent_id=parent_id,
-            extra={"session_id": self.session_id},
+            extra={"session_id": self.session_id, **({"stored": json.dumps(stored)} if stored else {})},
             args=args,
             start_time=start_time,
             end_time=end_time,
@@ -393,17 +411,18 @@ class TestRunner(Runner):
                 await self._handle_keyword_not_found(keyword_node, module_node, keyword_result, start_time, test_case_result)
                 return False
 
-            param_candidates = await self._build_param_candidates(keyword_node, keyword_node.params, module_node, keyword_result, start_time, test_case_result, capture_handler)
+            params, store_as = utils.split_store_as(keyword_node.params)
+            param_candidates = await self._build_param_candidates(keyword_node, params, module_node, keyword_result, start_time, test_case_result, capture_handler, utils.raw_param_indices(method))
             if param_candidates is None:
                 return False
 
             result = await self._try_execute_with_fallback(
-                method, param_candidates, keyword_node, module_node, keyword_result, start_time, test_case_result, capture_handler
+                method, param_candidates, keyword_node, module_node, keyword_result, start_time, test_case_result, capture_handler,
+                store_as=store_as,
             )
             if result is not None:
                 return result
 
-            await self._handle_fallback_exhausted(keyword_node, module_node, keyword_result, start_time, test_case_result, capture_handler)
             await asyncio.sleep(self.config.halt_duration)
             should_retry = await self._process_commands(keyword_node, module_node)
         finally:
@@ -432,10 +451,10 @@ class TestRunner(Runner):
         )
         self._update_status(keyword_result, "FAIL", time.time() - start_time, test_case_result.name)
 
-    async def _build_param_candidates(self, keyword_node, params, module_node, keyword_result, start_time, test_case_result, capture_handler):
+    async def _build_param_candidates(self, keyword_node, params, module_node, keyword_result, start_time, test_case_result, capture_handler, raw=frozenset()):
         param_candidates = []
-        for param in params:
-            if isinstance(param, str) and param.startswith("${") and param.endswith("}"):
+        for i, param in enumerate(params):
+            if i not in raw and isinstance(param, str) and param.startswith("${") and param.endswith("}"):
                 var_name = param[2:-1].strip()
                 values = self.elements.get_element(var_name)
                 if not values:
@@ -468,18 +487,21 @@ class TestRunner(Runner):
         self._update_status(keyword_result, "FAIL", time.time() - start_time, test_case_result.name)
 
     async def _try_execute_with_fallback(
-        self, method, param_candidates, keyword_node, module_node, keyword_result, start_time, test_case_result, capture_handler
+        self, method, param_candidates, keyword_node, module_node, keyword_result, start_time, test_case_result, capture_handler,
+        store_as=None,
     ):
         # Try all combinations of param candidates (for fallback)
         MAX_ATTEMPTS = 20
         attempts = 0
+        last_error: OpticsError | None = None
         for candidate_args in product(*param_candidates):
             attempts += 1
             if attempts > MAX_ATTEMPTS:
                 break
             try:
                 resolved_positional_params, resolved_kw_params = self._resolve_candidate_params(method, candidate_args)
-                method(*resolved_positional_params, **resolved_kw_params)
+                _, stored = utils.call_and_store(self.elements, method, resolved_positional_params, resolved_kw_params, store_as)
+                keyword_result.stored = stored
                 keyword_node.state = State.COMPLETED_PASSED
                 await self._send_event(
                     "keyword",
@@ -490,12 +512,14 @@ class TestRunner(Runner):
                     end_time=time.time(),
                     elapsed=time.time() - start_time,
                     logs=capture_handler.records,
+                    stored=stored,
                 )
                 self._update_status(keyword_result, "PASS", time.time() - start_time, test_case_result.name)
                 return True
             except OpticsError as oe:
                 if oe.code.value.startswith("E02") or oe.code == Code.X0201:
                     internal_logger.debug(f"Keyword fallback: tried {candidate_args}, error: {oe}")
+                    last_error = oe
                     continue
                 else:
                     await self._handle_keyword_exception(keyword_node, module_node, keyword_result, start_time, test_case_result, oe, capture_handler)
@@ -503,6 +527,9 @@ class TestRunner(Runner):
             except Exception as e:
                 await self._handle_keyword_exception(keyword_node, module_node, keyword_result, start_time, test_case_result, e, capture_handler)
                 return False
+        await self._handle_fallback_exhausted(
+            keyword_node, module_node, keyword_result, start_time, test_case_result, capture_handler, last_error
+        )
         return None
 
     async def _handle_keyword_exception(self, keyword_node, module_node, keyword_result, start_time, test_case_result, exc, capture_handler):
@@ -522,10 +549,15 @@ class TestRunner(Runner):
             logs=capture_handler.records,
         )
         self._update_status(keyword_result, "FAIL", time.time() - start_time, test_case_result.name)
+        self._save_failure_elements(test_case_result.name, keyword_result.resolved_name)
 
-    async def _handle_fallback_exhausted(self, keyword_node, module_node, keyword_result, start_time, test_case_result, capture_handler):
+    async def _handle_fallback_exhausted(
+        self, keyword_node, module_node, keyword_result, start_time, test_case_result, capture_handler, last_error
+    ):
         keyword_node.state = State.COMPLETED_FAILED
         reason = f"Keyword '{keyword_node.name}' failed after fallback attempts"
+        if last_error is not None:
+            reason += f"; last error: {last_error}"
         self._note_failure(reason)
         keyword_result.reason = reason
         await self._send_event(
@@ -540,6 +572,23 @@ class TestRunner(Runner):
             logs=capture_handler.records,
         )
         self._update_status(keyword_result, "FAIL", time.time() - start_time, test_case_result.name)
+        self._save_failure_elements(test_case_result.name, keyword_result.resolved_name)
+
+    def _save_failure_elements(self, test_case: str, step: str) -> None:
+        """Add the screen's compact element list to failed_steps_elements.json, to fix a failed step's locators."""
+        get_elements = self.keyword_map.get("get_interactive_elements")
+        if get_elements is None:
+            return
+        output_dir = self.config.execution_output_path
+        if not output_dir or not self.config.save_captures or not self._end_of_run_driver_open():
+            return
+        try:
+            self._failed_steps_elements.append({"test_case": test_case, "step": step, "elements": get_elements(compact=True)})
+            text = json.dumps(self._failed_steps_elements, indent=2, ensure_ascii=False)
+            with open(os.path.join(output_dir, "failed_steps_elements.json"), "w", encoding="utf-8") as f:
+                f.write(mask_secrets(text))
+        except Exception as e:
+            internal_logger.warning("Element list for the failed step skipped: %s", e)
 
     def _end_of_run_driver_open(self) -> bool:
         """Best-effort check that the driver session is still alive.
@@ -718,6 +767,7 @@ class TestRunner(Runner):
     ) -> TestCaseResult:
         start_time = time.time()
         self._last_failure_reason = None
+        use_secrets(self.elements.secrets)
         testcase_id = str(uuid.uuid4())
         extra = self._extra(test_case)
         test_case_result = self._init_test_case(test_case)
@@ -870,11 +920,21 @@ class TestRunner(Runner):
             self._update_status(keyword_result, "RUNNING", 0.0, test_case_result.name)
 
             try:
-                resolved_params = [
-                    self.resolve_param(param) for param in keyword_current.params
-                ]
+                params, store_as = utils.split_store_as(keyword_current.params)
+                method = self.keyword_map.get("_".join(keyword_current.name.split()).lower())
+                params = utils.substitute_inline(method, params, self.elements)
+                raw = utils.raw_param_indices(method)
+                resolved_params = [param if i in raw else self.resolve_param(param) for i, param in enumerate(params)]
+                # Nothing runs here, so define the names a run would set.
+                if store_as is not None:
+                    utils.require_store_name(store_as)
+                    self.elements.store(store_as, f"<{store_as}>")
+                if getattr(method, "_defines_variable", False) and params:
+                    defined = utils.WHOLE_VAR_PATTERN.sub(r"\1", str(params[0]).strip()).strip()
+                    self.elements.remove_element(defined)
+                    self.elements.add_element(defined, f"<{defined}>")
                 if isinstance(keyword_result, KeywordResult):
-                    keyword_result.resolved_name = (
+                    keyword_result.resolved_name = mask_secrets(
                         f"{keyword_current.name} ({', '.join(resolved_params)})"
                         if resolved_params
                         else keyword_current.name
@@ -948,17 +1008,6 @@ class TestRunner(Runner):
             current = current.next
         self.result_printer.stop_live()
 
-    def _resolve_candidate_params(self, method, candidate_args):
-        positional_params, kw_params = DataReader.split_params_by_signature(
-            method, list(candidate_args))
-        resolved_positional_params = [self.resolve_param(param) for param in positional_params]
-        resolved_kw_params = {}
-        for key, value in kw_params.items():
-            if value.startswith("${") and value.endswith("}"):
-                value = self.resolve_param(value)
-            resolved_kw_params[key] = value
-        return resolved_positional_params, resolved_kw_params
-
 
 class PytestRunner(Runner):
     instance = None
@@ -1013,12 +1062,13 @@ class PytestRunner(Runner):
             self._queue_event_fail(keyword, keyword_id, module_id, f"Keyword not found: {keyword}")
             pytest.fail(f"Keyword not found: {keyword}")
 
-        param_candidates = self._build_param_candidates_pytest(params, keyword_id, keyword, module_id)
+        params, store_as = utils.split_store_as(params)
+        param_candidates = self._build_param_candidates_pytest(params, keyword_id, keyword, module_id, utils.raw_param_indices(method))
         if param_candidates is None:
             return False
 
         return self._try_execute_with_fallback_pytest(
-            method, param_candidates, keyword, keyword_id, module_id
+            method, param_candidates, keyword, keyword_id, module_id, store_as=store_as
         )
 
     def _execute_keyword_dry_run(self, keyword, func_name, keyword_id, module_id):
@@ -1077,10 +1127,10 @@ class PytestRunner(Runner):
             self.event_manager
         )
 
-    def _build_param_candidates_pytest(self, params, keyword_id, keyword, module_id):
+    def _build_param_candidates_pytest(self, params, keyword_id, keyword, module_id, raw=frozenset()):
         param_candidates = []
-        for param in params:
-            if isinstance(param, str) and param.startswith("${") and param.endswith("}"):
+        for i, param in enumerate(params):
+            if i not in raw and isinstance(param, str) and param.startswith("${") and param.endswith("}"):
                 var_name = param[2:-1].strip()
                 values = self.elements.get_element(var_name)
                 if not values:
@@ -1103,7 +1153,7 @@ class PytestRunner(Runner):
                 param_candidates.append([param])
         return param_candidates
 
-    def _try_execute_with_fallback_pytest(self, method, param_candidates, keyword, keyword_id, module_id):
+    def _try_execute_with_fallback_pytest(self, method, param_candidates, keyword, keyword_id, module_id, store_as=None):
         MAX_ATTEMPTS = 20
         attempts = 0
         last_exc = None
@@ -1114,8 +1164,8 @@ class PytestRunner(Runner):
                 break
             try:
                 resolved_positional_params, resolved_kw_params = self._resolve_candidate_params(method, candidate_args)
-                method(*resolved_positional_params, **resolved_kw_params)
-                self._queue_keyword_pass_event(keyword, keyword_id, module_id)
+                _, stored = utils.call_and_store(self.elements, method, resolved_positional_params, resolved_kw_params, store_as)
+                self._queue_keyword_pass_event(keyword, keyword_id, module_id, stored)
                 return True
             except OpticsError as oe:
                 if oe.code.value.startswith("E02") or oe.code == Code.X0201:
@@ -1136,7 +1186,7 @@ class PytestRunner(Runner):
         )
         return False
 
-    def _queue_keyword_pass_event(self, keyword, keyword_id, module_id):
+    def _queue_keyword_pass_event(self, keyword, keyword_id, module_id, stored=None):
         queue_event_sync(
             Event(
                 entity_type="keyword",
@@ -1144,7 +1194,7 @@ class PytestRunner(Runner):
                 name=keyword,
                 status=EventStatus.PASS,
                 parent_id=module_id,
-                extra={"session_id": self.session.session_id},
+                extra={"session_id": self.session.session_id, **({"stored": json.dumps(stored)} if stored else {})},
             ),
             self.event_manager
         )
@@ -1152,17 +1202,6 @@ class PytestRunner(Runner):
     def _handle_keyword_fail(self, keyword, keyword_id, module_id, msg):
         self._queue_event_fail(keyword, keyword_id, module_id, msg)
         pytest.fail(msg)
-
-    def _resolve_candidate_params(self, method, candidate_args):
-        positional_params, kw_params = DataReader.split_params_by_signature(
-            method, list(candidate_args))
-        resolved_positional_params = [self.resolve_param(param) for param in positional_params]
-        resolved_kw_params = {}
-        for key, value in kw_params.items():
-            if value.startswith("${") and value.endswith("}"):
-                value = self.resolve_param(value)
-            resolved_kw_params[key] = value
-        return resolved_positional_params, resolved_kw_params
 
     def _process_module(
         self, module_name: str, dry_run: bool = False, testcase_id: str = "unknown"
@@ -1240,6 +1279,7 @@ class PytestRunner(Runner):
         self, test_case: str, dry_run: bool = False
     ) -> TestCaseResult:
         start_time = time.time()
+        use_secrets(self.elements.secrets)
         testcase_id = str(uuid.uuid4())
         result = TestCaseResult(
             id=testcase_id, name=test_case, elapsed="0.00s", status="NOT_RUN"

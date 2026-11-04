@@ -22,7 +22,6 @@ Configuration is **project-specific**: the one file that matters is `config.yaml
     log_level: INFO
     project_path: "./my_android_project"
     halt_duration: 0.1
-    max_attempts: 3
 
     # Driver Configuration
     driver_sources:
@@ -75,7 +74,6 @@ Configuration is **project-specific**: the one file that matters is `config.yaml
     log_level: INFO
     project_path: "./web_test_project"
     halt_duration: 0.2
-    max_attempts: 5
 
     # Driver Configuration
     driver_sources:
@@ -168,11 +166,14 @@ Configuration is **project-specific**: the one file that matters is `config.yaml
 |----------|-------------|---------------|
 | **Logging** | `console`, `file_log`, `json_log`, `log_level` | `log_level: INFO` or `DEBUG` |
 | **Paths** | `project_path`, `execution_output_path` | `./my_project`, `./outputs` |
-| **Execution** | `halt_duration`, `max_attempts` | `0.1`, `3` |
+| **Execution** | `halt_duration` | `0.1` |
 | **Drivers** | `appium`, `selenium`, `playwright`, `ble` | See Driver Sources tab |
 | **Element Sources** | `appium_find_element`, `playwright_screenshot`, etc. | See Element Sources tab |
 | **Text Detection** | `easyocr`, `pytesseract`, `google_vision` | See Text Detection tab |
 | **Image Detection** | `templatematch`, `remote_oir` | See Image Detection tab |
+| **LLM Models** | `gemini`, `openai`, `anthropic` | See LLM Models tab |
+| **AI Self-Healing** | `ai_self_heal` | `false` (opt-in) |
+| **Natural-language agent** | `nl_agent` | `vision: auto`, `max_steps: 15` |
 
 ## Configuration Structure
 
@@ -183,6 +184,7 @@ All configurations are defined in YAML format. The main configuration file (`con
 - **Element sources** - Element detection methods
 - **Text detection engines** - OCR capabilities
 - **Image detection engines** - Template matching
+- **LLM models** - Optional LLM backend for AI self-healing and `optics live`'s natural-language mode
 
 ---
 
@@ -292,23 +294,13 @@ All configurations are defined in YAML format. The main configuration file (`con
     halt_duration: 0.1  # 100ms pause between actions
     ```
 
-    ### `max_attempts`
-
-    **Type:** `int` | **Default:** `3`
-
-    Maximum number of retry attempts for failing actions. The framework will retry up to this many times before reporting failure.
-
-    ```yaml
-    max_attempts: 3
-    ```
-
 === "Test Control"
 
     ### `include`
 
     **Type:** `Optional[List[str]]` | **Default:** `null`
 
-    List of test case names to include in execution. Only the specified test cases will be executed; all others will be skipped.
+    List of test case names to include in execution. Only the specified test cases will be executed; all others will be skipped. Setup and teardown test cases always run.
 
     ```yaml
     include:
@@ -328,6 +320,8 @@ All configurations are defined in YAML format. The main configuration file (`con
       - "Test Deprecated Flow"
     ```
 
+    Names in `include` and `exclude` are matched case-insensitively, ignoring extra whitespace, and accept `*` and `?` wildcards. The two lists can be combined: `include` narrows the set and `exclude` then removes from it. A name that matches no test case stops the run with a suggestion instead of silently running nothing. The `--include` / `--exclude` flags of `optics execute` and `optics dry_run` replace both lists for a single run (see [Selecting test cases](usage/CLI_usage.md#selecting-test-cases)).
+
     ### `event_attributes_json`
 
     **Type:** `Optional[str]` | **Default:** `null`
@@ -337,6 +331,45 @@ All configurations are defined in YAML format. The main configuration file (`con
     ```yaml
     event_attributes_json: "./config/event_attributes.json"
     ```
+
+=== "AI Self-Healing"
+
+    ### `ai_self_heal`
+
+    **Type:** `bool` | **Default:** `false`
+
+    Last-resort recovery for element location. When every locator strategy (XPath, text,
+    OCR, image) fails for a self-healing-capable keyword (e.g. `Press Element`, `Enter Text`),
+    a bounded LLM-driven loop reads the screen and attempts to recover before the keyword
+    fails outright.
+
+    Opt-in and inert unless an entry under `llm_models` is also enabled — a missing or
+    misconfigured LLM degrades this to a no-op rather than a failure:
+
+    ```yaml
+    ai_self_heal: true
+
+    llm_models:
+      - gemini:
+          enabled: true
+    ```
+
+    See [LLM Models](#llm-models) below for backend configuration.
+
+=== "Natural-Language Agent"
+
+    ### `nl_agent`
+
+    **Type:** `object` | **Default:** `{vision: auto, max_steps: 15, escalation_model: ""}`
+
+    Settings of the natural-language mode of `optics live` (`Ctrl-N`). They have an effect
+    only when an entry under `llm_models` is enabled.
+
+    | Key | Meaning |
+    |-----|---------|
+    | `vision` | When the agent sends the screenshot. `auto` sends it on the first turn, after a step that code did not confirm, when the screen has few or unlabelled controls, and when no element list is available. `always` sends it on every turn. `never` sends no image, for text-only models. |
+    | `max_steps` | The most actions the agent takes for one instruction. |
+    | `escalation_model` | A model ID for the same engine as the first enabled `llm_models` entry. The agent sends hard turns to it: a second try after a bad reply, a turn after two failures in a row, and a turn with a guard note. Empty means one model for all turns. |
 
 ---
 
@@ -392,6 +425,20 @@ Driver sources define the automation frameworks used to control devices or brows
 
         iOS (XCUITest) includes such elements by default (with a `visible="false"`
         attribute) -- no equivalent setting needed.
+
+    !!! info "Idle wait before each command"
+        Before each command, UiAutomator2 (Android) and XCUITest (iOS) wait for the app to
+        stop changing. Their own limit is 10 seconds, so on a screen that never stops
+        changing (a running timer, a focused input) every step takes 10 seconds or more.
+        Optics sets the limit to 1 second. Your `appium:settings` merge with this default.
+        To change the limit, set `waitForIdleTimeout`: Android takes milliseconds, iOS
+        takes seconds, and `0` disables the wait on both:
+
+        ```yaml
+        capabilities:
+          appium:settings:
+            waitForIdleTimeout: 0
+        ```
 
 === "Selenium"
 
@@ -762,11 +809,18 @@ Image detection engines provide template matching capabilities for locating UI e
       - templatematch:
           enabled: true
           url: null
-          capabilities: {}
+          capabilities:
+            sift_nfeatures: 2000
     ```
 
     !!! note "Local Processing"
         Template matching runs locally using OpenCV and does not require external services.
+
+    Matching is two-stage: a `cv2.matchTemplate` fast path handles exact
+    same-scale matches, and a SIFT + FLANN + RANSAC fallback covers scaled or
+    rotated instances. `capabilities.sift_nfeatures` (default `2000`) caps the
+    SIFT features extracted per frame in that fallback, bounding per-call
+    memory; raise it only if scaled matches fail on feature-poor screens.
 
 === "Remote OIR"
 
@@ -779,6 +833,117 @@ Image detection engines provide template matching capabilities for locating UI e
           url: "https://your-oir-service.com/api/match"
           capabilities: {}
     ```
+
+---
+
+## LLM Models
+
+LLM backends power two opt-in features: the [`ai_self_heal`](#ai_self_heal) recovery path
+above, and `optics live`'s natural-language mode (`Ctrl-N`). Both stay inert until an entry
+below is enabled — the backend SDK is only imported when its engine is enabled, so leaving
+this section out has no cost for projects that don't use either feature.
+
+Each engine has an extra of the same name (`pip install 'optics-framework[openai]'`); the
+`llm` extra installs all three. Keys are read from environment variables only. If you enable
+more than one entry, a failed call falls through to the next one in list order.
+
+Every engine takes `capabilities.timeout_s` (default `60`): the seconds one request may take.
+A request that takes longer fails like any other LLM error, so a stalled connection cannot hang
+a run. The `openai` and `anthropic` SDKs retry a timed-out request twice before it fails.
+
+| You have | Engine |
+|----------|--------|
+| A Gemini API key, or Vertex AI | `gemini` |
+| An OpenAI key, OpenRouter, Azure OpenAI, or a local server (Ollama, vLLM, LM Studio) | `openai` |
+| A Claude key, or Claude on Amazon Bedrock / Google Vertex AI | `anthropic` |
+
+=== "Gemini"
+
+    **Purpose:** Google Gemini via the `google-genai` SDK, supporting both the Gemini
+    Developer API and Vertex AI. Install: `pip install 'optics-framework[gemini]'`.
+
+    ```yaml
+    llm_models:
+      - gemini:
+          enabled: true
+          capabilities:
+            model: gemini-3.8-flash    # optional; framework default is gemini-2.5-flash
+            # temperature: 0.0         # optional; unset uses the model default (Gemini 3 recommends 1.0)
+            # use_vertexai: true       # optional; else uses GOOGLE_GENAI_USE_VERTEXAI
+            # project: your-project    # optional Vertex override; else GOOGLE_CLOUD_PROJECT
+            # location: us-east4       # optional Vertex override; else GOOGLE_CLOUD_LOCATION
+    ```
+
+    With no `capabilities` set, the SDK auto-detects everything from environment variables:
+
+    | Variable | Purpose |
+    |----------|---------|
+    | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Gemini Developer API key |
+    | `GOOGLE_GENAI_USE_VERTEXAI` | Switch to Vertex AI |
+    | `GOOGLE_CLOUD_PROJECT` | Vertex AI project |
+    | `GOOGLE_CLOUD_LOCATION` | Vertex AI location |
+    | `GOOGLE_APPLICATION_CREDENTIALS` | Vertex AI service account credentials |
+
+    !!! warning "Don't hardcode credentials"
+        `capabilities.api_key` / `capabilities.gemini_api_key` are also accepted but log a
+        warning when used — prefer the environment variables above so keys never end up in
+        a committed `config.yaml`.
+
+=== "OpenAI-compatible"
+
+    **Purpose:** any server that speaks the OpenAI Chat Completions API, via the `openai`
+    SDK. Without `url` it calls OpenAI; with one it calls that server instead.
+    Install: `pip install 'optics-framework[openai]'`.
+
+    ```yaml
+    llm_models:
+      - openai:
+          enabled: true
+          url: https://openrouter.ai/api/v1   # omit for OpenAI; or OPENAI_BASE_URL
+          capabilities:
+            model: anthropic/claude-sonnet-5-5  # required; the name the server uses
+            api_key_env: OPENROUTER_API_KEY     # optional; default OPENAI_API_KEY
+            # response_format: json_object     # for servers without JSON-schema output
+            # max_tokens: 4096                  # optional cap per reply; unset = server default
+            # temperature: 0.0
+    ```
+
+    | Server | `url` | Key |
+    |--------|-------|-----|
+    | OpenAI | (omit) | `OPENAI_API_KEY` |
+    | OpenRouter | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` via `api_key_env` |
+    | Azure OpenAI | `https://<resource>.openai.azure.com/openai/v1/` | your Azure key via `api_key_env` |
+    | Ollama | `http://localhost:11434/v1` | none |
+    | vLLM / LM Studio | the server's `/v1` URL | none |
+
+    Natural-language mode and self-heal send screenshots, so pick a model that accepts
+    images. Responses use strict JSON-schema output by default; if the server rejects it,
+    set `response_format: json_object` and the schema is sent in the prompt instead.
+
+=== "Anthropic"
+
+    **Purpose:** Claude via the `anthropic` SDK, on the Claude API, Amazon Bedrock, or
+    Google Vertex AI. Install: `pip install 'optics-framework[anthropic]'` (for Bedrock
+    or Vertex, also `pip install 'anthropic[bedrock]'` or `'anthropic[vertex]'`).
+
+    ```yaml
+    llm_models:
+      - anthropic:
+          enabled: true
+          capabilities:
+            model: claude-sonnet-5-5   # required; Bedrock/Vertex use their own model IDs
+            # platform: bedrock        # anthropic (default) | bedrock | vertex
+            # region: us-east-1        # Bedrock or Vertex region
+            # project: your-project    # Vertex project
+            # max_tokens: 4096
+            # temperature: 0.0
+    ```
+
+    | Platform | Credentials |
+    |----------|-------------|
+    | `anthropic` | `ANTHROPIC_API_KEY`, or the variable named by `api_key_env` |
+    | `bedrock` | the standard AWS credential chain (`AWS_PROFILE`, `AWS_REGION`, …) |
+    | `vertex` | Google application default credentials |
 
 ---
 

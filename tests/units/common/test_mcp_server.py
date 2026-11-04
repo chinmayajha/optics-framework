@@ -13,18 +13,27 @@ import asyncio
 import base64
 import inspect
 import json
+import os
+import subprocess
+import sys
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 pytest.importorskip("fastmcp")
 
-from fastmcp import Client  # noqa: E402
-from fastmcp.exceptions import ToolError  # noqa: E402
-from fastapi import HTTPException  # noqa: E402
+from fastapi import HTTPException
+from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
-from optics_framework.common import expose_api  # noqa: E402
-from optics_framework.helper import mcp_server  # noqa: E402
+from optics_framework.common import expose_api
+from optics_framework.common.agent_core import RESOURCE_KEYWORDS
+from optics_framework.common.logging_config import (
+    internal_logger,
+    logging_manager,
+)
+from optics_framework.helper import mcp_server
 
 pytestmark = pytest.mark.white_box
 
@@ -43,7 +52,7 @@ def _exec_response(result):
 
 
 def test_action_keywords_registered_as_tools():
-    server = mcp_server.build_server()
+    server = mcp_server.build_server("full")
     names = {t.name for t in _run(server._list_tools())}
     for expected in (
         "start_session",
@@ -59,14 +68,14 @@ def test_action_keywords_registered_as_tools():
 
 
 def test_readonly_observers_excluded_from_tools():
-    server = mcp_server.build_server()
+    server = mcp_server.build_server("full")
     names = {t.name for t in _run(server._list_tools())}
-    for observer in mcp_server._RESOURCE_ONLY_KEYWORDS:
+    for observer in RESOURCE_KEYWORDS:
         assert observer not in names
 
 
 def test_state_resources_registered():
-    server = mcp_server.build_server()
+    server = mcp_server.build_server("full")
     resources = {str(r.uri) for r in _run(server._list_resources())}
     templates = {t.uri_template for t in _run(server._list_resource_templates())}
     assert "optics://keywords" in resources
@@ -82,7 +91,7 @@ def test_state_resources_registered():
 
 
 def test_keyword_tool_schema_is_string_typed_with_session_id():
-    server = mcp_server.build_server()
+    server = mcp_server.build_server("full")
     press = next(t for t in _run(server._list_tools()) if t.name == "press_element")
     props = press.parameters["properties"]
     # session_id is injected and required alongside the keyword's required args.
@@ -102,7 +111,7 @@ def test_keyword_tool_schema_is_string_typed_with_session_id():
 
 
 def test_tool_dispatch_forwards_stringified_params():
-    server = mcp_server.build_server()
+    server = mcp_server.build_server("full")
     mock = AsyncMock(return_value=_exec_response("pressed"))
     with patch.object(expose_api, "execute_keyword", new=mock):
         async def go():
@@ -127,7 +136,7 @@ def test_tool_dispatch_forwards_stringified_params():
 
 def test_non_string_scalar_is_rejected_by_schema():
     """The str contract is enforced at the boundary (no silent coercion)."""
-    server = mcp_server.build_server()
+    server = mcp_server.build_server("full")
     with patch.object(expose_api, "execute_keyword", new=AsyncMock()):
         async def go():
             async with Client(server) as client:
@@ -180,7 +189,7 @@ def test_mcp_dispatch_binds_real_self_healing_signatures(slug, params):
 
 @pytest.mark.parametrize("slug, params", _SELF_HEALING_KEYWORDS)
 def test_mcp_tool_to_dispatch_binds_real_signatures(slug, params):
-    server = mcp_server.build_server()
+    server = mcp_server.build_server("full")
     engine = MagicMock()
     engine.execute = AsyncMock(return_value=_exec_response("ok"))
 
@@ -219,7 +228,7 @@ def test_mcp_tool_to_dispatch_binds_real_signatures(slug, params):
 
 def test_http_error_translates_to_tool_error():
 
-    server = mcp_server.build_server()
+    server = mcp_server.build_server("full")
     mock = AsyncMock(side_effect=HTTPException(status_code=404, detail="session not found"))
     with patch.object(expose_api, "execute_keyword", new=mock):
         async def go():
@@ -236,7 +245,7 @@ def test_http_error_translates_to_tool_error():
 
 
 def test_keywords_resource_returns_catalog():
-    server = mcp_server.build_server()
+    server = mcp_server.build_server("full")
 
     async def go():
         async with Client(server) as client:
@@ -245,11 +254,12 @@ def test_keywords_resource_returns_catalog():
     contents = _run(go())
     catalog = json.loads(contents[0].text)
     slugs = {entry["keyword_slug"] for entry in catalog}
-    assert "press_element" in slugs and "capture_screenshot" in slugs
+    assert "press_element" in slugs
+    assert "capture_screenshot" not in slugs
 
 
 def test_screenshot_resource_returns_raw_bytes():
-    server = mcp_server.build_server()
+    server = mcp_server.build_server("full")
     raw = b"\x89PNG\r\n\x1a\nfake-bytes"
     b64 = base64.b64encode(raw).decode()
     mock = AsyncMock(return_value=_exec_response(b64))
@@ -275,7 +285,7 @@ def test_decode_screenshot_handles_data_url():
 
 def test_screenshot_tool_returns_rendered_image():
     """The screenshot tool yields image/png ImageContent (renders inline)."""
-    server = mcp_server.build_server()
+    server = mcp_server.build_server("full")
     raw = b"\x89PNG\r\n\x1a\nfake"
     b64 = base64.b64encode(raw).decode()
     mock = AsyncMock(return_value=_exec_response(b64))
@@ -288,7 +298,8 @@ def test_screenshot_tool_returns_rendered_image():
 
     assert mock.call_args.args[1] == "capture_screenshot"
     image = result.content[0]
-    assert image.type == "image" and image.mimeType == "image/png"
+    assert image.type == "image"
+    assert image.mime_type == "image/png"
     assert base64.b64decode(image.data) == raw
 
 
@@ -296,6 +307,66 @@ def test_screenshot_tool_returns_rendered_image():
 
 
 def test_require_fastmcp_raises_when_missing():
-    with patch.object(mcp_server, "_FASTMCP_IMPORT_ERROR", ImportError("no fastmcp")):
-        with pytest.raises(RuntimeError, match="optics-framework\\[mcp\\]"):
-            mcp_server._require_fastmcp()
+    with (
+        patch.object(mcp_server, "_FASTMCP_IMPORT_ERROR", ImportError("no fastmcp")),
+        pytest.raises(RuntimeError, match="optics-framework\\[mcp\\]"),
+    ):
+        mcp_server._require_fastmcp()
+
+
+def test_stdio_logging_never_blocks_on_unread_stderr(monkeypatch):
+    from rich.console import Console
+
+    read_fd, write_fd = os.pipe()
+    handler = logging_manager.internal_console_handler
+    monkeypatch.setattr(handler, "console", Console(file=os.fdopen(write_fd, "w")))
+    monkeypatch.setattr(mcp_server, "build_server", MagicMock)
+    original_handlers = list(internal_logger.handlers)
+    try:
+        mcp_server.run_mcp_server("stdio")
+        flood = threading.Thread(
+            target=lambda: [internal_logger.warning("x" * 1024) for _ in range(256)],
+            daemon=True,
+        )
+        flood.start()
+        flood.join(timeout=5)
+        assert not flood.is_alive(), "logging blocked on a full stderr pipe"
+    finally:
+
+        def drain():
+            while os.read(read_fd, 65536):
+                pass
+
+        drainer = threading.Thread(target=drain, daemon=True)
+        drainer.start()  # releases whichever writer is blocked on the pipe
+        logging_manager.stop_listeners()
+        internal_logger.handlers[:] = original_handlers
+        handler.console.file.close()
+        drainer.join(timeout=5)
+        os.close(read_fd)
+
+
+_EXIT_CHILD = """
+from unittest.mock import MagicMock
+from optics_framework.common.logging_config import internal_logger
+from optics_framework.helper import mcp_server
+
+server = MagicMock()
+server.run.side_effect = lambda **_: [internal_logger.warning("x" * 1024) for _ in range(256)]
+mcp_server.build_server = lambda *_: server
+mcp_server.run_mcp_server("stdio")
+"""
+
+
+def test_stdio_server_exits_with_unread_stderr():
+    child = subprocess.Popen(
+        [sys.executable, "-c", _EXIT_CHILD],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert child.wait(timeout=60) == 0
+    finally:
+        child.kill()
+        child.communicate()

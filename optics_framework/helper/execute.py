@@ -1,16 +1,15 @@
+import inspect
 import os
 import shutil
 import socket
 import subprocess  # nosec B404
 import sys
 import asyncio
-from typing import NoReturn, Optional, Tuple, List, Dict, Set, Any
+from typing import Optional, Tuple, List, Dict, Set, Any, NoReturn
 from urllib.parse import urlparse
 import yaml
 from pydantic import BaseModel, field_validator
 from pathlib import Path
-from rich.console import Console
-from rich.panel import Panel
 from optics_framework.common.config_handler import Config, DependencyConfig
 from optics_framework.common.logging_config import internal_logger, initialize_handlers
 from optics_framework.common.runner.data_reader import (
@@ -32,6 +31,25 @@ from optics_framework.common.models import (
     TemplateData,
     ErrorDefinitions,
 )
+from optics_framework.helper.abort import abort_with_panel
+from optics_framework.helper.case_selection import select_test_cases
+
+
+def _reader_accepts_module_names(reader) -> bool:
+    try:
+        parameters = inspect.signature(reader.read_modules).parameters
+    except (TypeError, ValueError):
+        return False
+    return "module_names" in parameters
+
+
+def _read_module_names(reader, file_path) -> Set[str]:
+    read_names = getattr(reader, "read_module_names", None)
+    if read_names is not None:
+        return read_names(file_path)
+    if _reader_accepts_module_names(reader):
+        return set(reader.read_modules(file_path, None))
+    return set(reader.read_modules(file_path))
 
 
 def discover_templates(project_path: str) -> TemplateData:
@@ -274,55 +292,21 @@ def validate_required_files(
         sys.exit(1)
 
 
-def _should_include_test_case(
-    name: str, include_set: Set[str], exclude_set: Set[str]
-) -> bool:
-    """
-    Determine if a test case should be included based on include/exclude sets.
-
-    :param name: Test case name (lowercase).
-    :param include_set: Set of test case names to include.
-    :param exclude_set: Set of test case names to exclude.
-    :return: True if the test case should be included, False otherwise.
-    """
-    if include_set:
-        return name in include_set
-    if exclude_set:
-        return name not in exclude_set
-    return True
-
-
 def filter_test_cases(
     test_cases_dict: Dict[str, Any],
-    include: Optional[List[str]] = None,
-    exclude: Optional[List[str]] = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ) -> Dict[str, Any]:
+    """Narrow test cases to the include/exclude selection (see ``case_selection``).
+
+    Setup/teardown cases are the ones ``categorize_test_cases`` wires around
+    every test, so they always run; a name that merely contains "setup" but
+    runs as a regular test is filtered like any other.
     """
-    Filter a dictionary of test cases based on include or exclude list.
-    Always include setup or teardown test cases.
-
-    :param test_cases_dict: Dictionary of test case names and their steps.
-    :param include: List of test case names to include (case-insensitive).
-    :param exclude: List of test case names to exclude (case-insensitive).
-    :return: Filtered dictionary with test case names as keys.
-    """
-    if include and exclude:
-        raise OpticsError(Code.E0403, message="Provide either include or exclude list, not both.")
-
-    include_set = {tc.strip().lower() for tc in include} if include else set()
-    exclude_set = {tc.strip().lower() for tc in exclude} if exclude else set()
-    filtered = {}
-
-    for name, steps in test_cases_dict.items():
-        lname = name.lower()
-        if (
-            "setup" in lname
-            or "teardown" in lname
-            or _should_include_test_case(lname, include_set, exclude_set)
-        ):
-            filtered[name] = steps
-
-    return filtered
+    *_, regular_test_cases = categorize_test_cases(test_cases_dict)
+    return select_test_cases(
+        test_cases_dict, include, exclude, selectable=regular_test_cases.keys()
+    )
 
 
 def categorize_test_cases(
@@ -547,14 +531,6 @@ def _adb_device_count() -> int | None:
     return count if in_list else 0
 
 
-def _abort_preflight(lines: List[str]) -> NoReturn:
-    """Print a friendly rich block explaining the failure and exit non-zero."""
-    console = Console(file=sys.stderr)
-    console.print(Panel("\n".join(lines), title="Cannot start",
-                        border_style="red"))
-    sys.exit(1)
-
-
 def _preflight_or_exit(config: Config | None, folder_path: str = "<folder>") -> None:
     """
     Beginner-facing environment gate for ``optics execute``, run before any
@@ -604,7 +580,7 @@ def _preflight_appium(details: DependencyConfig, folder_path: str) -> None:
     """Probe the Appium server and, for Android, adb + an attached device."""
     url = details.url or _APPIUM_DEFAULT_URL
     if not _probe_tcp(url, default_port=4723):
-        _abort_preflight([
+        abort_with_panel([
             f"No Appium server reachable at {url}.",
             "",
             "Start one in another terminal:  appium",
@@ -615,7 +591,7 @@ def _preflight_appium(details: DependencyConfig, folder_path: str) -> None:
         return
     device_count = _adb_device_count()
     if device_count is None:
-        _abort_preflight([
+        abort_with_panel([
             "Android run requested, but the adb tool was not found.",
             "",
             "Install Android platform-tools (any option that puts adb on PATH),",
@@ -623,7 +599,7 @@ def _preflight_appium(details: DependencyConfig, folder_path: str) -> None:
             f"Then re-run:  optics execute {folder_path}",
         ])
     if device_count == 0:
-        _abort_preflight([
+        abort_with_panel([
             "No Android device/emulator attached (adb reports none).",
             "",
             "Connect a device (USB debugging on) or start an emulator,",
@@ -636,7 +612,7 @@ def _preflight_selenium(details: DependencyConfig, folder_path: str) -> None:
     """Probe the configured Selenium/WebDriver URL."""
     url = details.url or _SELENIUM_DEFAULT_URL
     if not _probe_tcp(url, default_port=4444):
-        _abort_preflight([
+        abort_with_panel([
             f"No Selenium/WebDriver server reachable at {url}.",
             "",
             "Start one, e.g.:  docker run -d -p 4444:4444 selenium/standalone",
@@ -650,6 +626,8 @@ class RunnerArgs(BaseModel):
     folder_path: str
     runner: str = "test_runner"
     use_printer: bool = True
+    include: list[str] | None = None
+    exclude: list[str] | None = None
 
     @field_validator("folder_path")
     @classmethod
@@ -674,6 +652,7 @@ class BaseRunner:
         self.folder_path = args.folder_path
         self.runner = args.runner
         self.use_printer = args.use_printer
+        self.selection_override = args.include is not None or args.exclude is not None
         internal_logger.debug(f"Using runner: {self.runner}")
 
         (
@@ -701,6 +680,9 @@ class BaseRunner:
             self.config.project_path = self.folder_path
         else:
             self.config = Config()
+        if self.selection_override:
+            self.config.include = args.include
+            self.config.exclude = args.exclude
 
         # Load templates after config is set
         self._load_templates()
@@ -726,9 +708,19 @@ class BaseRunner:
 
     def _load_modules(self, module_files):
         self.modules_data: ModuleData = ModuleData()
+        # Every module name first, across every file: a YAML step referencing a module is told
+        # from a keyword call by name, and the module it names may be defined in another file.
+        module_names = set()
         for file_path in module_files:
             reader = self.csv_reader if file_path.endswith(".csv") else self.yaml_reader
-            modules = reader.read_modules(file_path)
+            module_names |= _read_module_names(reader, file_path)
+        for file_path in module_files:
+            reader = self.csv_reader if file_path.endswith(".csv") else self.yaml_reader
+            modules = (
+                reader.read_modules(file_path, module_names)
+                if _reader_accepts_module_names(reader)
+                else reader.read_modules(file_path)
+            )
             for name, definition in modules.items():
                 if self.modules_data.get_module_definition(name):
                     internal_logger.warning(
@@ -789,11 +781,12 @@ class BaseRunner:
     def _filter_and_build_execution_queue(self):
         if not self.test_cases_data:
             self._exit_no_test_cases()
-        included = self.config.get("include")
-        excluded = self.config.get("exclude")
-        self.filtered_test_cases: Dict[str, Any] = filter_test_cases(
-            self.test_cases_data, included, excluded
-        )
+        try:
+            self.filtered_test_cases: Dict[str, Any] = filter_test_cases(
+                self.test_cases_data, self.config.include, self.config.exclude
+            )
+        except OpticsError as e:
+            self._exit_invalid_selection(e)
         self.execution_queue: TestCaseNode = build_linked_list(
             self.filtered_test_cases, self.modules_data
         )
@@ -813,6 +806,19 @@ class BaseRunner:
         internal_logger.error("No test cases found in %s", self.folder_path)
         print(message, file=sys.stderr)
         sys.exit(1)
+
+    def _exit_invalid_selection(self, error: OpticsError) -> NoReturn:
+        source = (
+            "--include/--exclude"
+            if self.selection_override
+            else "include/exclude in the project's config.yaml"
+        )
+        internal_logger.debug("Invalid test case selection: %s", error.message)
+        abort_with_panel([
+            *error.message.splitlines(),
+            "",
+            f"Fix the names given via {source}; matching ignores case and accepts * and ? wildcards.",
+        ])
 
     def _setup_session(self):
         if not self._has_enabled_driver():
@@ -887,22 +893,52 @@ def _has_failed_results(results: Any) -> bool:
 
 
 def execute_main(
-    folder_path: str, runner: str = "test_runner", use_printer: bool = True
+    folder_path: str,
+    runner: str = "test_runner",
+    use_printer: bool = True,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ):
     """Entry point for execute command."""
-    args = RunnerArgs(folder_path=folder_path, runner=runner, use_printer=use_printer)
-    runner_instance = ExecuteRunner(args)
-    _preflight_or_exit(getattr(runner_instance, "config", None), folder_path)
-    results = asyncio.run(runner_instance.execute())
-    if _has_failed_results(results):
+    if not run_project(folder_path, runner, use_printer, include, exclude):
         sys.exit(1)
 
 
+def run_project(
+    folder_path: str,
+    runner: str = "test_runner",
+    use_printer: bool = True,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> bool:
+    """Execute a project; True when nothing failed.
+
+    ``include``/``exclude`` replace the selection in config.yaml when either
+    is given. Split out of ``execute_main`` so an in-process caller can read
+    the outcome instead of catching the ``SystemExit`` the CLI reports
+    failure with."""
+    args = RunnerArgs(
+        folder_path=folder_path, runner=runner, use_printer=use_printer,
+        include=include, exclude=exclude,
+    )
+    runner_instance = ExecuteRunner(args)
+    _preflight_or_exit(getattr(runner_instance, "config", None), folder_path)
+    results = asyncio.run(runner_instance.execute())
+    return not _has_failed_results(results)
+
+
 def dryrun_main(
-    folder_path: str, runner: str = "test_runner", use_printer: bool = True
+    folder_path: str,
+    runner: str = "test_runner",
+    use_printer: bool = True,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ):
     """Entry point for dry run command."""
-    args = RunnerArgs(folder_path=folder_path, runner=runner, use_printer=use_printer)
+    args = RunnerArgs(
+        folder_path=folder_path, runner=runner, use_printer=use_printer,
+        include=include, exclude=exclude,
+    )
     runner_instance = DryRunRunner(args)
     results = asyncio.run(runner_instance.execute())
     if _has_failed_results(results):

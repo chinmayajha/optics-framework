@@ -13,9 +13,35 @@ XPATH_UNIQUE_ATTRIBUTES = [
     "name", "content-desc", "id", "resource-id", "accessibility-id",
 ]
 XPATH_MAYBE_UNIQUE_ATTRIBUTES = ["label", "text", "value"]
+# An input's text/value is what was typed into it, so its locator names it by its hint instead.
+XPATH_INPUT_MAYBE_UNIQUE_ATTRIBUTES = ["label", "hint", "placeholderValue"]
 
 # The only attributes get_xpath ever probes, so the only ones worth indexing.
-XPATH_INDEXED_ATTRIBUTES = (*XPATH_UNIQUE_ATTRIBUTES, *XPATH_MAYBE_UNIQUE_ATTRIBUTES)
+XPATH_INDEXED_ATTRIBUTES = (*XPATH_UNIQUE_ATTRIBUTES, *XPATH_MAYBE_UNIQUE_ATTRIBUTES, "hint", "placeholderValue")
+_OBFUSCATED_ID_RE = re.compile(r"\d+_resource_name_obfuscated")
+
+# Class-name fragments for the compact extractor. iOS has no clickable/checkable/
+# scrollable attributes, so its XCUIElementType* nodes are classified by name.
+# "XCUIElementTypeKey" is deliberately a fragment: it prefix-matches the keyboard
+# container too, which drops out as an unlabelled node with actionable descendants.
+TAP_CLASS_FRAGMENTS = (
+    "Button", "SeekBar", "Slider", "XCUIElementTypeCell", "XCUIElementTypeSwitch",
+    "XCUIElementTypeStepper", "XCUIElementTypeLink", "XCUIElementTypeTab", "XCUIElementTypeMenuItem",
+    "XCUIElementTypeKey",
+)
+TOGGLE_CLASS_FRAGMENTS = ("Switch", "CheckBox", "RadioButton", "ToggleButton")
+INPUT_CLASS_FRAGMENTS = ("EditText", "TextField", "SecureTextField", "AutoCompleteTextView", "SearchField")
+# A field's text (Android) and value (iOS) hold what was typed, not its name.
+FIELD_NAME_ATTRS = ("hint", "content-desc", "label", "name", "placeholderValue")
+SCROLL_CLASS_FRAGMENTS = (
+    "XCUIElementTypeScrollView", "XCUIElementTypeTable", "XCUIElementTypeCollectionView",
+    "XCUIElementTypePickerWheel",
+)
+COMPACT_LABEL_MAX_CHARS = 120
+
+
+def _obfuscated_id(rid: str) -> bool:
+    return bool(_OBFUSCATED_ID_RE.fullmatch(rid.rsplit(":id/", 1)[-1]))
 
 
 class XPathUniquenessIndex:
@@ -514,12 +540,13 @@ class UIHelper:
                     }
         return None
 
-    def get_locator_and_strategy(self, element):
+    def get_locator_and_strategy(self, element, strict: bool = False):
         """
         Determines the best strategy and locator for the given element identifier.
+
+        strict=True stops after exact/suffix matching -- no fuzzy fallback.
         """
         _, time_stamp = self.get_page_source()
-        tree = self.tree
 
         strategies = [
             ("text", "//*[@text]", "text"),
@@ -534,39 +561,49 @@ class UIHelper:
         if exact is not None:
             return exact
 
-        # Second pass: collect fuzzy candidates and pick the best-scoring one
+        if strict:
+            internal_logger.debug(f"Strict matching enabled; no exact match found for '{element}'.")
+            return None
+
+        return self._find_best_fuzzy_candidate(element, strategies, time_stamp)
+
+    @staticmethod
+    def _fuzzy_ratio(value: str, element: str) -> int:
+        try:
+            return fuzz.ratio(value.lower().strip(), element.lower().strip())
+        except Exception:
+            return 0
+
+    def _find_best_fuzzy_candidate(self, element, strategies, time_stamp):
+        """Second pass: collect fuzzy candidates and return the best-scoring one, if any."""
         best_candidate = None
         best_score = 0
         for strategy_name, xpath_query, attrib in strategies:
-            elements = tree.xpath(xpath_query)
-            for elem in elements:
+            for elem in self.tree.xpath(xpath_query):
                 value = elem.attrib.get(attrib, "").strip()
                 if not value:
                     continue
-                try:
-                    score = fuzz.ratio(value.lower().strip(), element.lower().strip())
-                except Exception:
-                    score = 0
+                score = self._fuzzy_ratio(value, element)
                 if score > best_score:
                     best_score = score
                     best_candidate = (strategy_name, value, elem.attrib)
 
-        if best_candidate and best_score >= 80:
-            strategy_name, value, attributes = best_candidate
+        if not best_candidate or best_score < 80:
             internal_logger.debug(
-                f"Fuzzy match selected (score={best_score}) using '{strategy_name}': '{value}'"
+                f"No matching element found in any of the locator strategies for '{element}'."
             )
-            return {
-                "strategy": strategy_name,
-                "locator": value,
-                "attributes": attributes,
-                "timestamp": time_stamp,
-            }
+            return None
 
+        strategy_name, value, attributes = best_candidate
         internal_logger.debug(
-            f"No matching element found in any of the locator strategies for '{element}'."
+            f"Fuzzy match selected (score={best_score}) using '{strategy_name}': '{value}'"
         )
-        return None
+        return {
+            "strategy": strategy_name,
+            "locator": value,
+            "attributes": attributes,
+            "timestamp": time_stamp,
+        }
 
     def get_view_locator(self, strategy, locator):
         """
@@ -652,7 +689,7 @@ class UIHelper:
             return None
 
     def get_locator_and_strategy_using_index(
-        self, element, index, strategy=None
+        self, element, index, strategy=None, strict: bool = False
     ) -> dict:
         """
         Perform a linear search across all strategies (resource-id, text, content-desc, etc.) in the UI tree,
@@ -662,6 +699,7 @@ class UIHelper:
             element (str): The element identifier to search for.
             index (int): zero indexing
             strategy (str): supported attributes in string, 'resource-id', 'text', 'content-desc', 'name', 'value', 'label'
+            strict (bool): if True, only exact/suffix matches are considered -- no partial/fuzzy fallback.
 
         Returns:
             list: A list of dictionaries, each containing the strategy, value, and index of the match.
@@ -695,52 +733,10 @@ class UIHelper:
                 bounds = elem.attrib.get("bounds", "")  # Parse bounds if available
                 position = self.parse_bounds(bounds)
                 all_elements.append(
-                    {"strategy": strategy, "value": attr_value, "position": position}
+                    {"strategy": strategy, "value": attr_value, "position": position, "node": elem}
                 )
 
-        # Perform a linear match against all elements
-        # Prefer exact matches (or suffix after '/') before falling back to fuzzy compare
-        exact_matches = []
-        fuzzy_matches = []
-        for idx, elem in enumerate(all_elements):
-            val = elem.get("value", "")
-            # exact full-string match
-            if val == element:
-                exact_matches.append(
-                    {
-                        "index": idx,
-                        "strategy": elem["strategy"],
-                        "value": val,
-                        "position": elem["position"],
-                    }
-                )
-                continue
-
-            # exact suffix match (e.g., resource-id like 'pkg/name' -> 'name')
-            if "/" in val and val.rsplit("/", 1)[-1] == element:
-                exact_matches.append(
-                    {
-                        "index": idx,
-                        "strategy": elem["strategy"],
-                        "value": val,
-                        "position": elem["position"],
-                    }
-                )
-                continue
-
-            # fallback to fuzzy/partial compare
-            if utils.compare_text(val, element):
-                fuzzy_matches.append(
-                    {
-                        "index": idx,
-                        "strategy": elem["strategy"],
-                        "value": val,
-                        "position": elem["position"],
-                    }
-                )
-
-        # If exact matches exist, prefer them; otherwise use fuzzy matches
-        matches = exact_matches if exact_matches else fuzzy_matches
+        matches = self._index_matches(tree, all_elements, element, strict)
 
         # Log matches
         internal_logger.debug(
@@ -759,9 +755,36 @@ class UIHelper:
 
         strategy = desired_match["strategy"]
         locator = desired_match["value"]
+        same_value = [tree.getpath(n) for n in tree.xpath(f"//*[@{strategy}=$value]", value=locator)]
+        node_path = tree.getpath(desired_match["node"])
+        occurrence = same_value.index(node_path) + 1 if node_path in same_value else 1
 
         internal_logger.debug(f"Returning strategy: {strategy}, locator: {locator}")
-        return {"strategy": strategy, "locator": locator}
+        return {"strategy": strategy, "locator": locator, "count": len(matches), "occurrence": occurrence}
+
+    @staticmethod
+    def _index_matches(tree, all_elements: list, element: str, strict: bool) -> list:
+        """Exact (or ``pkg/name`` suffix) matches, else fuzzy ones, one per node."""
+        exact_matches = []
+        fuzzy_matches = []
+        for idx, elem in enumerate(all_elements):
+            val = elem.get("value", "")
+            match = {
+                "index": idx,
+                "strategy": elem["strategy"],
+                "value": val,
+                "position": elem["position"],
+                "node": elem["node"],
+            }
+            if val == element or ("/" in val and val.rsplit("/", 1)[-1] == element):
+                exact_matches.append(match)
+            elif not strict and utils.compare_text(val, element):
+                fuzzy_matches.append(match)
+        # A node matched through two attributes (text and content-desc) is one element.
+        unique: dict = {}
+        for match in exact_matches or fuzzy_matches:
+            unique.setdefault(tree.getpath(match["node"]), match)
+        return list(unique.values())
 
     def parse_bounds(self, bounds):
         """
@@ -887,8 +910,124 @@ class UIHelper:
         except etree.XPathSyntaxError as e:
             internal_logger.debug(f"Invalid XPath syntax: {xpath} - Error: {str(e)}")
 
-    # element extraction
-    def get_interactive_elements(self, filter_config: Optional[List[str]] = None) -> List[Dict]:
+    # Compact interactive-element extraction (get_interactive_elements(compact=True)).
+    @staticmethod
+    def _class_of(node: etree.Element) -> str:
+        return node.attrib.get("class") or node.tag or ""
+
+    def _element_actions(self, node: etree.Element) -> List[str]:
+        """Interactions a node affords: tap/long/toggle/input/scroll (empty => none)."""
+        attrs, cls = node.attrib, self._class_of(node)
+        actions: List[str] = []
+        if attrs.get("clickable") == "true" or any(f in cls for f in TAP_CLASS_FRAGMENTS):
+            actions.append("tap")
+        if attrs.get("long-clickable") == "true":
+            actions.append("long")
+        if attrs.get("checkable") == "true" or any(f in cls for f in TOGGLE_CLASS_FRAGMENTS):
+            actions.append("toggle")
+        if attrs.get("editable") == "true" or any(f in cls for f in INPUT_CLASS_FRAGMENTS):
+            actions.append("input")
+        if attrs.get("scrollable") == "true" or any(f in cls for f in SCROLL_CLASS_FRAGMENTS):
+            actions.append("scroll")
+        return actions
+
+    def _is_actionable(self, node: etree.Element) -> bool:
+        attrs = node.attrib
+        if attrs.get("enabled") == "false" or attrs.get("visible") == "false":
+            return False
+        return bool(self._extract_bounds(node)) and bool(self._element_actions(node))
+
+    @staticmethod
+    def _own_label(node: etree.Element) -> str:
+        # label before name: on iOS `label` is the human text and `name` an accessibility id.
+        for key in ("text", "content-desc", "label", "name", "value"):
+            val = (node.attrib.get(key) or "").strip()
+            if val:
+                return val
+        return ""
+
+    def _folded_label(self, node: etree.Element) -> str:
+        # Own label, else descendant text; stops at nested actionable subtrees so a row
+        # keeps its own label and does not swallow a control it contains.
+        own = self._own_label(node)
+        if own:
+            return own[:COMPACT_LABEL_MAX_CHARS]
+        parts: List[str] = []
+
+        def walk(current: etree.Element, is_root: bool) -> None:
+            if not is_root and self._is_actionable(current):
+                return
+            text = self._own_label(current)
+            if text:
+                parts.append(text)
+            for child in current:
+                walk(child, False)
+
+        walk(node, True)
+        return " ".join(dict.fromkeys(parts))[:COMPACT_LABEL_MAX_CHARS]
+
+    def _folds_text(self, node: etree.Element) -> bool:
+        # A clickable/toggle/input container folds its text; a pure scroll container does not.
+        return self._is_actionable(node) and self._element_actions(node) != ["scroll"]
+
+    def _has_folding_ancestor(self, node: etree.Element) -> bool:
+        parent = node.getparent()
+        while parent is not None:
+            if self._folds_text(parent):
+                return True
+            parent = parent.getparent()
+        return False
+
+    def _compact_entry(self, node: etree.Element, label: str, actions: List[str], bounds: Dict) -> Dict:
+        extra = {"class": self._class_of(node)}
+        rid = node.attrib.get("resource-id")
+        if rid and not _obfuscated_id(rid):
+            extra["resource-id"] = rid
+        if node.attrib.get("password") == "true":
+            extra["password"] = True
+        if "input" in actions:
+            hint = next((v for a in FIELD_NAME_ATTRS if (v := (node.attrib.get(a) or "").strip())), "")
+            if hint:
+                extra["hint"] = hint
+        return {"text": label, "bounds": bounds, "act": actions, "extra": extra}
+
+    def _has_actionable_descendant(self, node: etree.Element) -> bool:
+        return any(c is not node and self._is_actionable(c) for c in node.iter())
+
+    def _compact_entry_for(self, node: etree.Element) -> Optional[Dict]:
+        # One compact entry for a node, or None to drop it.
+        bounds = self._extract_bounds(node)
+        if not bounds or node.attrib.get("visible") == "false":
+            return None
+        actions = self._element_actions(node) if node.attrib.get("enabled") != "false" else []
+        if actions == ["scroll"]:
+            return self._compact_entry(node, self._own_label(node), actions, bounds)
+        if actions:
+            label = self._folded_label(node)
+            # An empty-labelled wrapper around another actionable element (an iOS Cell
+            # around its Button) is noise; the inner element carries the label.
+            if label or not self._has_actionable_descendant(node):
+                return self._compact_entry(node, label, actions, bounds)
+            return None
+        label = self._own_label(node)
+        if label and len(node) == 0 and not self._has_folding_ancestor(node):
+            return self._compact_entry(node, label, [], bounds)
+        return None
+
+    def _extract_compact_interactives(self, root: etree.Element) -> List[Dict]:
+        # Actionable elements (folded labels) + standalone visible text; drops the rest.
+        index = XPathUniquenessIndex(root)
+        entries = []
+        for node in root.iter():
+            entry = self._compact_entry_for(node)
+            if entry is not None:
+                entry["loc"] = self.get_xpath(node, index)
+                entries.append(entry)
+        return entries
+
+    def get_interactive_elements(
+        self, filter_config: Optional[List[str]] = None, compact: bool = False
+    ) -> List[Dict]:
         """
         Cross-platform element extraction supporting both Android and iOS.
 
@@ -901,11 +1040,15 @@ class UIHelper:
                 - "images": Only image elements
                 - "text": Only text elements
                 Can be combined: ["buttons", "inputs"]
+            compact: When True, ignore filter_config and return only actionable elements
+                (with descendant labels folded in) plus standalone visible text (act: []).
         """
         page_source, _ = self.get_page_source()
         root = etree.ElementTree(
             etree.fromstring(page_source.encode("utf-8"))
         ).getroot()
+        if compact:
+            return self._extract_compact_interactives(root)
         elements = root.xpath(".//*")
         # One index for the whole tree: every node's XPath is derived from the same
         # document, so the uniqueness probes are shared rather than rescanned per node.
@@ -998,7 +1141,8 @@ class UIHelper:
             ("value", norm(attrs.get("value"))),               # iOS
             (
                 "resource-id",
-                norm(attrs.get("resource-id", "").split("/")[-1]) if attrs.get("resource-id") else None,  # Android
+                norm(attrs.get("resource-id", "").split("/")[-1])
+                if attrs.get("resource-id") and not _obfuscated_id(attrs["resource-id"]) else None,  # Android
             ),
         ]
         for key, val in text_candidates:
@@ -1088,11 +1232,15 @@ class UIHelper:
     def _xpath_try_cases_for_unique(
         self, node: etree.Element, index: XPathUniquenessIndex
     ) -> Optional[str]:
-        all_attrs = [*XPATH_UNIQUE_ATTRIBUTES, *XPATH_MAYBE_UNIQUE_ATTRIBUTES]
+        unique = (
+            [a for a in XPATH_UNIQUE_ATTRIBUTES if a != "resource-id"]
+            if _obfuscated_id(node.attrib.get("resource-id") or "") else XPATH_UNIQUE_ATTRIBUTES
+        )
+        maybe = XPATH_INPUT_MAYBE_UNIQUE_ATTRIBUTES if "input" in self._element_actions(node) else XPATH_MAYBE_UNIQUE_ATTRIBUTES
         cases: List[Any] = [
-            XPATH_UNIQUE_ATTRIBUTES,
-            self._xpath_attribute_pairs_permutations(all_attrs),
-            XPATH_MAYBE_UNIQUE_ATTRIBUTES,
+            unique,
+            self._xpath_attribute_pairs_permutations([*unique, *maybe]),
+            maybe,
             [],
         ]
         semi_unique: Optional[str] = None
@@ -1150,6 +1298,9 @@ class UIHelper:
             candidate = self._xpath_build_hierarchical(node, index) or self._build_structural_xpath(node)
         index.xpath_cache[node] = candidate
         return candidate
+
+    def nth_view_locator(self, strategy: str, locator: str, occurrence: int) -> str:
+        return f"(//*[@{strategy}={self._escape_for_xpath_literal(locator)}])[{occurrence}]"
 
     def _escape_for_xpath_literal(self, s: str) -> str:
         """

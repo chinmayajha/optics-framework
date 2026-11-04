@@ -205,7 +205,7 @@ enter_text(["username", "user_name", "//input[@name='user']"], "testuser")
 **3. Environment-Specific Values:**
 ```python
 # Different values for different environments
-launch_app([
+launch_app(app_identifier=[
     "com.example.app.dev",      # Development
     "com.example.app.staging",  # Staging
     "com.example.app.prod"      # Production
@@ -735,7 +735,6 @@ class Config(BaseModel):
     include: Optional[List[str]] = None
     exclude: Optional[List[str]] = None
     halt_duration: float = 0.1
-    max_attempts: int = 3
 
     # Events
     event_attributes_json: Optional[str] = None
@@ -955,7 +954,6 @@ log_level: "DEBUG"
 file_log: true
 log_path: "/path/to/logs"
 event_attributes_json: "/path/to/events.json"
-max_attempts: 5
 halt_duration: 0.2
 ```
 
@@ -1614,6 +1612,7 @@ Provides assertion and validation capabilities.
 - `validate_element()` - Verify single element
 - `validate_screen()` - Verify multiple elements
 - `assert_presence()` - Assert with rules (any/all)
+- `assert_text()` - Assert the text of an element or the value of a field
 - `assert_images_vision()` - Vision-based image assertion
 - `assert_texts_vision()` - Vision-based text assertion
 - `get_interactive_elements()` - Get UI elements

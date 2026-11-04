@@ -13,12 +13,15 @@ from datetime import timezone, timedelta
 from typing import Callable, List, Optional, Tuple, Any, Union, get_origin, get_args
 import inspect
 from skimage.metrics import structural_similarity as ssim
-from optics_framework.common.logging_config import internal_logger
+from optics_framework.common.logging_config import internal_logger, execution_logger, register_secret, holding_logs_for_secret, mask_secrets
 from optics_framework.common.error import OpticsError, Code
 from optics_framework.common.models import ElementData
 
 OUTPUT_PATH_NOT_SET_MSG = "output_dir is required. Pass it from the session's execution_output_path."
 TEXT_ONLY_PREFIX = "text_only:"
+XPATH_PREFIX = "xpath="
+# A web field's innerText is empty; what it shows is its value.
+TEXT_OR_VALUE_JS = "el => ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) ? el.value : el.innerText"
 WHOLE_VAR_PATTERN = re.compile(r"^\$\{([^}]+)\}$")
 
 
@@ -47,6 +50,79 @@ def resolve_scalar_param(session: Any, param: str) -> str:
     if not value:
         raise OpticsError(Code.E0201, message=f"Variable '{param}' is an empty list.")
     return str(value[0])
+
+
+# $${name} escapes to a literal ${name}.
+INLINE_VAR_PATTERN = re.compile(r"\$?\$\{([^}]+)\}")
+STORE_AS_PATTERN = re.compile(r"^\s*store_as\s*=\s*(.*)$", re.DOTALL)
+
+
+def raw_param_indices(method: Any) -> set[int]:
+    return set(getattr(method, "_raw_param_indices", ()))
+
+
+def _inline_targets(method: Any, params: list) -> set[int]:
+    if getattr(method, "_substitutes_own_vars", False):
+        return set()
+    raw = raw_param_indices(method)
+    return {i for i, p in enumerate(params) if i not in raw and isinstance(p, str) and "${" in p}
+
+
+def substitute_inline(method: Any, params: list, elements: ElementData) -> list:
+    """A whole-param ${name} is left for the fallback expansion; an unknown name fails the step."""
+    def substitute(param: str) -> str:
+        def value(match: re.Match) -> str:
+            if match.group(0).startswith("$$"):
+                return match.group(0)
+            values = elements.get_element(match.group(1).strip())
+            if not values:
+                raise OpticsError(Code.E0403, message=f"Variable '{match.group(0)}' in '{param}' is not defined.")
+            return str(values[0])
+        return INLINE_VAR_PATTERN.sub(value, param)
+
+    targets = _inline_targets(method, params)
+    return [substitute(p) if i in targets and not WHOLE_VAR_PATTERN.match(p.strip()) else p for i, p in enumerate(params)]
+
+
+def unescape_vars(method: Any, params: list) -> list:
+    targets = _inline_targets(method, params)
+    return [p.replace("$${", "${") if i in targets else p for i, p in enumerate(params)]
+
+
+def split_store_as(params: list) -> tuple[list, str | None]:
+    rest, name = [], None
+    for param in params:
+        match = STORE_AS_PATTERN.match(param) if isinstance(param, str) else None
+        if match:
+            name = WHOLE_VAR_PATTERN.sub(r"\1", match.group(1).strip()).strip()
+        else:
+            rest.append(param)
+    return rest, name
+
+
+def require_store_name(name: str) -> None:
+    if not name:
+        raise OpticsError(Code.E0403, message="store_as needs a name, e.g. store_as=balance.")
+
+
+def store_result(elements: ElementData, name: str, result: Any) -> str:
+    require_store_name(name)
+    if result is None:
+        raise OpticsError(Code.E0403, message=f"Cannot store '{name}': the keyword returned no value.")
+    value = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+    register_secret(elements.secrets, name, value)
+    elements.store(name, value)
+    return value
+
+
+
+def call_and_store(elements: ElementData, method: Callable, args: list, kwargs: dict, store_as: str | None) -> tuple[Any, dict[str, str]]:
+    """Returns the keyword's result and, masked for reports, what store_as kept."""
+    with holding_logs_for_secret(store_as):
+        returned = method(*args, **kwargs)
+        if store_as is None:
+            return returned, {}
+        return returned, {store_as: mask_secrets(store_result(elements, store_as, returned))}
 
 
 class SpecialKey(Enum):
@@ -173,7 +249,7 @@ def determine_element_type(element):
         return "Image"
     if el.startswith("css="):
         return "CSS"
-    if el.startswith("xpath=") or element.startswith(("/", "//", "(")):
+    if el.startswith(XPATH_PREFIX) or element.startswith(("/", "//", "(")):
         return "XPath"
     if el.startswith("id:"):
         return "ID"
@@ -192,11 +268,67 @@ def determine_element_type(element):
     return "Text"
 
 
+_NATIVE_CLASS = re.compile(r"\bandroidx?(?:\.[a-z0-9_]+)+\.[A-Z]|XCUIElementType")
+_NATIVE_ATTRIBUTE = re.compile(
+    r"@(?:resource-id|content-desc|text|package|bounds"
+    r"|clickable|long-clickable|checkable|focusable|focused|scrollable"
+    r"|displayed|enabled|password|hint|visible|accessible)(?![\w.-])"
+)
+_STRING_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
+_DOM_TAGS = frozenset({
+    "a", "abbr", "article", "aside", "audio", "b", "body", "button", "canvas", "circle", "code", "dd",
+    "details", "dialog", "div", "dl", "dt", "em", "fieldset", "figure", "footer", "form", "g",
+    "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "html", "i", "iframe", "img", "input", "label",
+    "legend", "li", "main", "nav", "ol", "optgroup", "option", "p", "path", "picture", "pre", "rect",
+    "section", "select", "small", "source", "span", "strong", "summary", "svg", "table", "tbody", "td",
+    "textarea", "tfoot", "th", "thead", "tr", "u", "ul", "use", "video",
+})
+_XPATH_PREDICATE = re.compile(r"\[[^\[\]]*\]")
+_XPATH_TOKEN = re.compile(r"[@$][\w.:-]+|[\w.-]+|::|\S")
+_XPATH_NAME = re.compile(r"[A-Za-z_][\w.-]*")
+
+
+def _name_tests(branch: str) -> set[str]:
+    tokens = _XPATH_TOKEN.findall(branch)
+    return {t for t, after in zip(tokens, tokens[1:] + [""]) if after not in ("::", "(") and _XPATH_NAME.fullmatch(t)}
+
+
+def is_native_xpath(xpath: str) -> bool:
+    """Whether ``xpath`` names an Android or iOS class or attribute outside its string literals."""
+    if _NATIVE_CLASS.search(xpath):
+        return True
+    outside_literals = _STRING_LITERAL.sub("", xpath)
+    return _NATIVE_ATTRIBUTE.search(outside_literals) is not None
+
+
+def is_dom_only_xpath(xpath: str) -> bool:
+    """Whether every branch of ``xpath`` names an HTML element, so only a web page's DOM can match it."""
+    if is_native_xpath(xpath):
+        return False
+    spine = _STRING_LITERAL.sub("''", xpath[len(XPATH_PREFIX):] if xpath.lower().startswith(XPATH_PREFIX) else xpath)
+    while (stripped := _XPATH_PREDICATE.sub("", spine)) != spine:
+        spine = stripped
+    return all(_DOM_TAGS & _name_tests(branch) for branch in spine.split("|"))
+
+
 def parse_text_only_prefix(element: str) -> Tuple[str, bool]:
     """Return (stripped_element, use_text_detection_only)."""
     if element.lower().startswith(TEXT_ONLY_PREFIX):
         return (element[len(TEXT_ONLY_PREFIX) :].lstrip(), True)
     return (element, False)
+
+
+def to_bool(value: Any, default: bool = False) -> bool:
+    """Coerce a flag that may cross the keyword boundary as a string to a bool.
+
+    Recognizes true/1/yes/on case-insensitively; ``None`` yields ``default``. Needed
+    because ``"false"`` is otherwise a truthy non-empty string.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
 
 
 def get_timestamp():
@@ -290,10 +422,21 @@ def detect_change(frame1, frame2, threshold=0.95):
     score, _ = ssim(gray1, gray2, full=True)
     return score < threshold
 
-def compare_text(given_text, target_text):
+def warn_if_ambiguous(element: str, count: int, index: int) -> None:
+    if count > 1:
+        execution_logger.warning(
+            f"'{element}' matches {count} elements; using the one at index {index}. "
+            "Pass index= or a more specific locator to pick another."
+        )
+
+
+def compare_text(given_text, target_text, strict: bool = False):
     """
     Compare two text values using exact, partial, and fuzzy matching.
     Returns True if the texts match closely enough, otherwise False.
+
+    strict=True restricts the comparison to an exact match only -- no partial/substring
+    or fuzzy fallback -- for presence/assertion checks where a false positive is unacceptable.
     """
     # Normalize both texts (case insensitive, strip whitespace)
     given_text = given_text.strip().lower()
@@ -309,6 +452,10 @@ def compare_text(given_text, target_text):
         internal_logger.debug(f"Exact match found: '{given_text}' == '{target_text}'")
         internal_logger.debug(f'Exact match found for text: {given_text}')
         return True
+
+    if strict:
+        internal_logger.debug(f"Strict match required; no exact match for '{given_text}' and '{target_text}'.")
+        return False
 
     # 2. Partial Match (substring, return immediately)
     if target_text in given_text:
@@ -347,10 +494,11 @@ def save_screenshot(img, name, output_dir, time_stamp=None):
     name = re.sub(r'[^a-zA-Z0-9\s_]', '', name)
     if time_stamp is None:
         time_stamp = str(datetime.now().astimezone().strftime('%Y-%m-%dT%H-%M-%S-%f'))
-    screenshot_file_path = os.path.join(output_dir, f"{time_stamp}-{name}.jpg")
+    file_stamp = str(time_stamp).replace(":", "-")
+    screenshot_file_path = os.path.join(output_dir, f"{file_stamp}-{name}.jpg")
     try:
         cv2.imwrite(screenshot_file_path, img)
-        internal_logger.debug(f'Screenshot saved as : {time_stamp}-{name}.jpg')
+        internal_logger.debug(f'Screenshot saved as : {file_stamp}-{name}.jpg')
         internal_logger.debug(f"Screenshot saved to :{screenshot_file_path}")
 
     except Exception as e:
@@ -425,7 +573,7 @@ def _is_interesting(el) -> bool:
         return True
     # Platform-specific class heuristics for editable / password fields.
     cls = el.get("class") or el.tag or ""
-    if cls.endswith("EditText") or cls.endswith("TextField") or cls.endswith("SecureTextField"):
+    if cls.endswith(("EditText", "TextField", "SecureTextField")):
         return True
     if el.get("password") == "true":
         return True
@@ -876,16 +1024,26 @@ def bbox_from_appium_attribute_fallback(element: Any) -> Optional[Tuple[Tuple[in
 
 def bbox_from_webelement_like(obj: Any) -> Optional[Tuple[Tuple[int, int], Tuple[int, int]]]:
     """
-    Return bounding box for a single WebElement-like object with .location/.size or .rect.
+    Return bounding box for a single WebElement-like object with .rect or .location/.size.
 
     Works for both Android (UIAutomator2) and iOS (XCUITest); both expose W3C-compatible
-    location, size, and rect on the WebElement.
+    location, size, and rect on the WebElement. ``rect`` comes first because it is one request.
 
-    :param obj: WebElement-like object with .location and .size dicts, or .rect (Selenium 4/Appium).
+    :param obj: WebElement-like object with .rect (Selenium 4/Appium), or .location and .size dicts.
     :return: ((x1,y1), (x2,y2)) or None if not available.
     """
     if obj is None:
         return None
+    try:
+        rect = getattr(obj, "rect", None)
+        if rect is not None and isinstance(rect, dict):
+            x1 = int(rect.get("x", 0))
+            y1 = int(rect.get("y", 0))
+            w = int(rect.get("width", 0))
+            h = int(rect.get("height", 0))
+            return ((x1, y1), (x1 + w, y1 + h))
+    except (TypeError, ValueError, AttributeError):
+        pass
     try:
         loc = getattr(obj, "location", None)
         sz = getattr(obj, "size", None)
@@ -895,16 +1053,6 @@ def bbox_from_webelement_like(obj: Any) -> Optional[Tuple[Tuple[int, int], Tuple
             x2 = int(x1 + sz.get("width", 0))
             y2 = int(y1 + sz.get("height", 0))
             return ((x1, y1), (x2, y2))
-    except (TypeError, ValueError, AttributeError):
-        pass
-    try:
-        rect = getattr(obj, "rect", None)
-        if rect is not None and isinstance(rect, dict):
-            x1 = int(rect.get("x", 0))
-            y1 = int(rect.get("y", 0))
-            w = int(rect.get("width", 0))
-            h = int(rect.get("height", 0))
-            return ((x1, y1), (x1 + w, y1 + h))
     except (TypeError, ValueError, AttributeError):
         pass
     return None

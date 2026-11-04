@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional, List, Tuple
 import numpy
+from optics_framework.common.session_liveness import raise_if_session_dead
 
 class ElementSourceInterface(ABC):
     """
@@ -52,6 +53,10 @@ class ElementSourceInterface(ABC):
         """
         pass
 
+    def can_locate(self, element: str) -> bool:
+        """Whether this source can look ``element`` up; an assertion leaves out sources that cannot."""
+        return True
+
     @abstractmethod
     def assert_elements(self, elements: Any, timeout: int = 30, rule: str = 'any') -> None:
         """
@@ -68,6 +73,19 @@ class ElementSourceInterface(ABC):
         :raises AssertionError: If the assertion fails based on the rule.
         """
         pass
+
+    def check_elements(self, elements: list[str], visible: bool = False) -> list[bool]:
+        """One look, no waiting: whether each element is present (visible when ``visible``) right now."""
+        assert_method = self.assert_elements_visible if visible else self.assert_elements
+        found = []
+        for element in elements:
+            try:
+                # 0 would skip the `while elapsed < timeout` loops most sources poll with
+                found.append(assert_method([element], 1, "any") is not False)
+            except Exception as e:
+                raise_if_session_dead(e)
+                found.append(False)
+        return found
 
     def get_element_bboxes(
         self, elements: list
@@ -122,12 +140,17 @@ class ElementSourceInterface(ABC):
         )
 
     @abstractmethod
-    def get_interactive_elements(self, filter_config: Optional[List[str]] = None) -> list:
+    def get_interactive_elements(self, filter_config: Optional[List[str]] = None, compact: bool = False) -> list:
         """
         Retrieve a list of interactive elements on the current screen.
 
         :param filter_config: Optional list of filter types (e.g., ["buttons", "inputs"]).
         :type filter_config: Optional[List[str]]
+        :param compact: When True, return only actionable elements (folded labels) plus
+            standalone visible text. It is forwarded only to implementations that declare
+            it; sources kept on the legacy two-argument signature still work and return
+            their full list.
+        :type compact: bool
         :return: A list of interactive elements (e.g., buttons, links).
         :rtype: list
         """

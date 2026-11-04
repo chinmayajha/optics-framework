@@ -84,12 +84,20 @@ sleep 5
 
 | Command          | Description |
 |------------------|-------------|
-| `/save <test_case> <module_name>` | Save the recorded actions as `<module_name>` in `modules/modules.csv` and add a `(<test_case>, <module_name>)` row to `test_cases/test_cases.csv`. Elements are merged into your project's existing elements CSV when one is tracked anywhere (the templates keep it at `test_data/elements.csv`) — only names not already present are appended, so no second `elements/elements.csv` appears; with no elements file, a header-only `elements/elements.csv` stub is created. All three files use fixed names and are **appended** to when they already exist, so you can build a suite one module at a time. A successful save **clears the recording buffer**, so the next actions become the next module. If `<module_name>` or `<test_case>` already exists, the save is refused with a prompt — re-run the identical `/save` to append, or pick a different name. Session screenshots/artifacts are also snapshotted to `execution_output/<module_name>/`. |
-| `/device [id]`   | **Appium sessions only.** List all connected **Android** (`adb`) and **iOS** (`idevice_id`) devices, each labelled by platform; with no argument, pick one to switch the active device's `udid`. The chosen device must match the session's configured platform. For Selenium/Playwright it reports that switching doesn't apply (the target is the configured browser). |
-| `/elements`      | Open a read-only popup of named elements and their locators (Esc closes). |
+| `/save <test_case> <module_name>` | Save the recorded actions as `<module_name>` in `modules/modules.csv` and add a `(<test_case>, <module_name>)` row to `test_cases/test_cases.csv`. Elements are merged into your project's existing elements CSV when one is tracked anywhere (the templates keep it at `test_data/elements.csv`) — only names not already present are appended, so no second `elements/elements.csv` appears; with no elements file, `elements/elements.csv` is created with the elements that natural-language runs named. All three files use fixed names and are **appended** to when they already exist, so you can build a suite one module at a time. A successful save **clears the recording buffer**, so the next actions become the next module. If `<module_name>` or `<test_case>` already exists, the save is refused with a prompt — re-run the identical `/save` to append, or pick a different name. Session screenshots/artifacts are also snapshotted to `execution_output/<module_name>/`. |
+| `/device [id]`   | **Appium sessions only.** List the **Android** (`adb`) and **iOS** (`idevice_id`) devices attached to *this* machine, each labelled by platform; with no argument, pick one to switch the active device's `udid`. The chosen device must match the session's configured platform. For Selenium/Playwright it reports that switching doesn't apply (the target is the configured browser). See the note below for remote Appium hubs. |
+| `/elements`      | Open a read-only popup of named elements and their locators (Up/Down scrolls, Esc closes). |
 | `/screenshot`    | Capture the current device screen to a file and note the path in the history. |
-| `/help`          | Show the command reference (Esc closes). |
+| `/help`          | Show the command reference (Up/Down scrolls, Esc closes). |
 | `/quit`, `/exit` | End the session, run the normal driver teardown/cleanup, and exit. Typing `quit` or `exit` without the slash does the same, so leaving is never a guessing game. An unknown `/command` prints the available commands instead of failing silently. |
+
+> **`/device` and remote Appium hubs.** `/device` shells out to the local `adb devices`
+> and `idevice_id -l`, so it only ever sees devices plugged into the machine running
+> `optics live`. If your session drives a device through a remote Appium hub, that device
+> is attached to the hub's machine, not yours — `/device` will not list it, and reports
+> no devices found even while the session is happily driving one. That's out of scope,
+> not a fault: pick the hub device the way you already do, through the `udid` /
+> `deviceName` capabilities in your `config.yaml`.
 
 ## Keys
 
@@ -98,6 +106,7 @@ sleep 5
 | `Enter`        | Run the command, or accept the highlighted completion |
 | `Tab` / `S-Tab`| Cycle completions |
 | `${`           | Suggest element names |
+| `Up` / `Down`  | Scroll an open popup (`PgUp`/`PgDn` by page); otherwise recall previous input |
 | `Ctrl-K`       | Toggle the keyword browser |
 | `Ctrl-N`       | Toggle natural-language (AI) mode |
 | `Ctrl-X`       | Abort a running AI run (stops at the next step) |
@@ -107,60 +116,62 @@ sleep 5
 ## Natural-language mode (optional)
 
 Press `Ctrl-N` to toggle AI mode, then type an instruction in plain English
-(e.g. `type "movies for kids" in the search bar`). Each turn the LLM is given a
-screenshot **and** a condensed UI hierarchy of the on-screen elements (their text,
-content-desc, resource ids, bounds, and flags — when the driver exposes a page source),
-and drives keywords step-by-step until the goal is reached; `Ctrl-X` aborts. A fully
-successful run is recorded and `/save`-able like any manual session. It works with whatever
+(e.g. `type "movies for kids" in the search bar`). `Ctrl-X` aborts. It works with whatever
 driver your config uses (Appium/Selenium/Playwright).
+
+Each turn the agent reads the screen as a list of rows, for example
+`e7 button "Sign in" [tap] #login`. `e7` is a ref, the words in quotes are on the screen,
+and `[tap]` lists what the element accepts. The LLM picks one action on a ref (`tap`, `type`,
+`select`, `scroll`, `key`, `open`, `check`, or any keyword) and says what text the next
+screen must show or lose. The agent then:
+
+- runs the action through a locator that matches only that element;
+- reads the screen again and judges the step in code as **pass**, **fail** or **unknown**;
+- accepts **done** only when the goal text is on the screen. A run that ends done without
+  goal text shows as `PASS (unverified)`.
+
+The agent turns each element it acts on into a named element, such as `${sign_in_button}`,
+whose values are the element's locators and, last, its label. When a project element has the
+same first locator, the agent uses that element. The recorded step is
+`press_element ${sign_in_button}`. The new elements join the session only when the instruction
+completes, and `/save` writes them to your elements CSV. AI self-heal is off while the agent
+runs, so every step it takes shows in its history.
 
 When an instruction completes, the recorded steps are **curated** before they enter the
 `/save` buffer: a final LLM pass keeps only the steps that contribute to the goal and drops
 the agent's dead-ends, backtracks, and no-op gestures — so what you save is a minimal,
-replayable script, not a transcript of everything it tried. An incomplete instruction
-(failed/aborted/step-limit) records nothing. If the curation pass can't produce a usable
-result it safely falls back to keeping every successful step, so a working recording is never
-lost. Three steps to enable AI mode:
+replayable script, not a transcript of everything it tried. Only the elements that the kept
+steps use are added. An incomplete instruction (failed/aborted/step-limit) records nothing
+and adds no elements. If the curation pass can't produce a usable result it
+safely falls back to keeping every successful step, so a working recording is never lost.
+Three steps to enable AI mode:
 
-**1. Install the optional LLM extra** (the SDK is not in the base install):
-
-```bash
-pip install 'optics-framework[llm]'
-# or, from a clone with poetry:
-poetry install --extras llm
-```
-
-**2. Provide Gemini credentials** (read from the environment — don't hardcode them).
-Pick one backend:
+**1. Install the extra for your provider** (the SDKs are not in the base install):
 
 ```bash
-# A. Gemini Developer API (key from Google AI Studio)
-export GEMINI_API_KEY=your_key            # GOOGLE_API_KEY also works
-
-# B. Vertex AI
-export GOOGLE_GENAI_USE_VERTEXAI=true
-export GOOGLE_CLOUD_PROJECT=your-project
-export GOOGLE_CLOUD_LOCATION=us-east4
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service_account.json
+pip install 'optics-framework[gemini]'    # or [openai], [anthropic]; [llm] installs all three
 ```
 
-**3. Enable `gemini` in your project's `config.yaml`** (alongside your driver/element sources):
+**2. Export your key** (read from the environment — don't hardcode it):
+
+```bash
+export GEMINI_API_KEY=your_key            # or OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY
+```
+
+**3. Enable the engine in your project's `config.yaml`** (alongside your driver/element sources):
 
 ```yaml
 llm_models:
   - gemini:
       enabled: true
-      capabilities:
-        model: gemini-2.5-flash    # optional; this is the default
-        # use_vertexai: true       # optional; else uses GOOGLE_GENAI_USE_VERTEXAI
-        # project / location       # optional Vertex overrides; else env vars
 ```
 
-All `capabilities` are optional — with none set, the SDK auto-detects everything from the
-environment variables above. The `google-genai` SDK is **only imported when `gemini` is
-enabled**, so non-AI users are unaffected. If you toggle `Ctrl-N` without an enabled
-`llm_models` entry, the session simply tells you to add one; if the extra isn't installed,
-you get a clear install hint.
+The `openai` engine also reaches OpenRouter, Azure OpenAI and local servers such as Ollama,
+and `anthropic` also runs Claude on Bedrock or Vertex AI. See
+[Configuration → LLM Models](../configuration.md#llm-models) for each engine's options. An
+engine's SDK is **only imported when that engine is enabled**, so non-AI users are
+unaffected. If you toggle `Ctrl-N` without an enabled `llm_models` entry, the session
+tells you to add one; if the extra isn't installed, you get the install command.
 
 ## Recording & saving
 
@@ -170,6 +181,17 @@ in the order it ran. The buffer is only written to disk when you run
 and then **clears the buffer** so the next actions form the next module. If you
 `/quit` with unsaved actions, you are warned once — run `/save <test_case> <module_name>`
 to keep them, or `/quit` again to discard and exit.
+
+### Secrets are not saved
+
+A value typed into a secret field is not written to disk. Live finds secret fields on the
+screen by their type (a password field), a masked value, or a name, caption, hint or
+locator such as "Password" or "PIN". A value typed without an element goes into the field
+that has focus. When live cannot tell which field that is, a secret field anywhere on the
+screen makes the value secret. The recorded step uses a new element, for example
+`${password_field_value}`, in place of the value. The session keeps the real value, so the
+steps run again in the same session. `/save` writes that element as `<redacted>`, so put
+the real value in the elements CSV before you run the saved test.
 
 ### Screenshots are saved automatically
 

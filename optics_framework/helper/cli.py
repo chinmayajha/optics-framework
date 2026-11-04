@@ -1,21 +1,39 @@
 import argparse
 import os
 import sys
-from typing import Literal, Optional
-from pydantic import BaseModel
-from optics_framework.helper.list_keyword import main as list_main
-from optics_framework.helper.initialize import create_project, available_templates
-from optics_framework.helper.version import VERSION
-from optics_framework.helper.execute import execute_main, dryrun_main
-from optics_framework.helper.live import live_main
-from optics_framework.helper.generate import generate_test_file as generate_framework_code
-from optics_framework.helper.setup import EngineInstallerApp, SetupError, list_engines, install_extras, resolve_engines, print_install_next_steps
-from optics_framework.helper.serve import run_uvicorn_server
-from optics_framework.helper.autocompletion import update_shell_rc
-from optics_framework.helper.config_manager import configure as configure_project
-from optics_framework.helper.onboarding import welcome, is_first_run, mark_onboarded
-from optics_framework.helper.doctor import run_doctor
-from optics_framework.helper.quickstart import run_quickstart
+from typing import Literal, NoReturn, Optional
+
+from optics_framework.helper.abort import abort_with_panel, reinstall_guidance
+
+
+def _abort_on_import_error(exc: ImportError) -> NoReturn:
+    """Report a startup import failure as guidance instead of a traceback."""
+    abort_with_panel([
+        "Optics could not load one of its dependencies, so no command can run.",
+        "",
+        f"Underlying error: {exc}",
+        "",
+        *reinstall_guidance(),
+    ])
+
+
+try:
+    from pydantic import BaseModel
+    from optics_framework.helper.list_keyword import main as list_main
+    from optics_framework.helper.initialize import create_project, available_templates
+    from optics_framework.helper.version import VERSION
+    from optics_framework.helper.execute import execute_main, dryrun_main
+    from optics_framework.helper.live import live_main
+    from optics_framework.helper.generate import generate_test_file as generate_framework_code
+    from optics_framework.helper.setup import EngineInstallerApp, SetupError, list_engines, install_extras, resolve_engines, print_install_next_steps
+    from optics_framework.helper.serve import run_uvicorn_server
+    from optics_framework.helper.autocompletion import update_shell_rc
+    from optics_framework.helper.config_manager import configure as configure_project
+    from optics_framework.helper.onboarding import welcome, is_first_run, mark_onboarded
+    from optics_framework.helper.doctor import run_doctor
+    from optics_framework.helper.quickstart import run_quickstart
+except ImportError as exc:
+    _abort_on_import_error(exc)
 
 
 class Command:
@@ -62,7 +80,22 @@ class ListCommand(Command):
 class AutocompletionCommand(Command):
     def register(self, subparsers: argparse._SubParsersAction):
         parser = subparsers.add_parser(
-            "completion", help="Enable shell autocompletion for optics CLI"
+            "completion",
+            help="Enable shell autocompletion for optics CLI",
+            description=(
+                "Enable Tab-completion of optics commands and arguments in bash or zsh.\n"
+                "\n"
+                "Writes the completion scripts to ~/.optics/optics_completion.sh (bash) and\n"
+                "~/.optics/optics_completion.zsh (zsh), then asks before appending a\n"
+                '"# Optics CLI autocompletion" comment and one "source" line to the rc file\n'
+                "for your $SHELL: ~/.bashrc for bash, ~/.zshrc for zsh. Declining the prompt,\n"
+                "or running without an interactive terminal, leaves the rc file untouched and\n"
+                "prints the line to add by hand instead.\n"
+                "\n"
+                "There is no uninstall flag: to undo, delete those two lines from the rc file\n"
+                "and, if you want, remove ~/.optics/optics_completion.*."
+            ),
+            formatter_class=argparse.RawDescriptionHelpFormatter,
         )
         parser.set_defaults(func=self.execute)
 
@@ -151,6 +184,7 @@ class MCPArgs(BaseModel):
     transport: Literal["stdio", "http"] = "stdio"
     host: str = "127.0.0.1"
     port: int = 8090
+    toolset: Literal["core", "full"] | None = None
 
 
 class MCPCommand(Command):
@@ -168,13 +202,18 @@ class MCPCommand(Command):
         parser.add_argument(
             "--port", type=int, default=8090, help="Port to bind for http transport (default: 8090)"
         )
+        parser.add_argument(
+            "--toolset", choices=["core", "full"],
+            help="core (default) or full: also one tool per keyword; default from OPTICS_MCP_TOOLSET"
+        )
         parser.set_defaults(func=self.execute)
 
     def execute(self, args):
         mcp_args = MCPArgs(
             transport=args.transport,
             host=args.host,
-            port=args.port
+            port=args.port,
+            toolset=args.toolset,
         )
         # Lazy import so the optional 'mcp' extra (fastmcp) is only required
         # when this command actually runs.
@@ -182,7 +221,8 @@ class MCPCommand(Command):
         run_mcp_server(
             transport=mcp_args.transport,
             host=mcp_args.host,
-            port=mcp_args.port
+            port=mcp_args.port,
+            toolset=mcp_args.toolset,
         )
 
 class ConfigureCommand(Command):
@@ -281,7 +321,12 @@ class InitCommand(Command):
         )
         parser.add_argument(
             "--template",
-            help="Start from a sample template: " + ", ".join(available_templates()),
+            help=(
+                "Start from a sample template: "
+                + ", ".join(available_templates())
+                + ". Omit to choose one from an interactive picker; with no "
+                "interactive terminal, a blank project is created instead."
+            ),
         )
         parser.add_argument(
             "--git-init",
@@ -326,11 +371,35 @@ class InitCommand(Command):
         create_project(init_args)
 
 
+def _add_selection_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add --include/--exclude, which replace the project config's selection."""
+    names_help = (
+        "Matching ignores case and accepts * and ? wildcards. Takes one or more "
+        "names; repeatable. Overrides include/exclude in config.yaml."
+    )
+    parser.add_argument(
+        "--include",
+        nargs="+",
+        action="extend",
+        metavar="TEST_CASE",
+        help=f"Run only these test cases. {names_help}",
+    )
+    parser.add_argument(
+        "--exclude",
+        nargs="+",
+        action="extend",
+        metavar="TEST_CASE",
+        help=f"Skip these test cases. {names_help}",
+    )
+
+
 class DryRunArgs(BaseModel):
     """Arguments for the dry_run command."""
     folder_path: str
     runner: str = "test_runner"
     use_printer: bool = True
+    include: list[str] | None = None
+    exclude: list[str] | None = None
 
 
 class DryRunCommand(Command):
@@ -360,18 +429,23 @@ class DryRunCommand(Command):
             action="store_false",
             help="Disable live result printer"
         )
+        _add_selection_arguments(parser)
         parser.set_defaults(func=self.execute, use_printer=True)
 
     def execute(self, args):
         dry_run_args = DryRunArgs(
             folder_path=args.folder_path,
             runner=args.runner,
-            use_printer=args.use_printer
+            use_printer=args.use_printer,
+            include=args.include,
+            exclude=args.exclude,
         )
         dryrun_main(
             dry_run_args.folder_path,
             dry_run_args.runner,
-            use_printer=dry_run_args.use_printer
+            use_printer=dry_run_args.use_printer,
+            include=dry_run_args.include,
+            exclude=dry_run_args.exclude,
         )
 
 
@@ -380,6 +454,8 @@ class ExecuteArgs(BaseModel):
     folder_path: str
     runner: str = "test_runner"
     use_printer: bool = True
+    include: list[str] | None = None
+    exclude: list[str] | None = None
 
 
 class ExecuteCommand(Command):
@@ -409,19 +485,23 @@ class ExecuteCommand(Command):
             action="store_false",
             help="Disable live result printer"
         )
+        _add_selection_arguments(parser)
         parser.set_defaults(func=self.execute, use_printer=True)
 
     def execute(self, args):
         execute_args = ExecuteArgs(
             folder_path=args.folder_path,
             runner=args.runner,
-            use_printer=args.use_printer
+            use_printer=args.use_printer,
+            include=args.include,
+            exclude=args.exclude,
         )
-        # Pass only required arguments for backward compatibility
         execute_main(
             execute_args.folder_path,
             execute_args.runner,
-            use_printer=execute_args.use_printer
+            use_printer=execute_args.use_printer,
+            include=execute_args.include,
+            exclude=execute_args.exclude,
         )
 
 

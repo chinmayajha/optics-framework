@@ -21,6 +21,7 @@ import pytest
 
 from textual.widgets import Static
 
+from optics_framework.helper.environment import EnvKind, Environment
 from optics_framework.helper.setup import (
     ALL_ENGINES,
     DISTRIBUTION_NAME,
@@ -124,6 +125,7 @@ class TestResolveEngines:
             ("mobile", ["appium"]),
             ("web", ["selenium", "playwright"]),
             ("vision", ["easyocr", "pytesseract", "google-vision"]),
+            ("llm", ["gemini", "openai", "anthropic"]),
         ],
     )
     def test_bundle_expands_to_member_engines(self, bundle, expected_extras):
@@ -207,9 +209,38 @@ class TestSplitToken:
 # install_extras                                                               #
 # --------------------------------------------------------------------------- #
 
+@pytest.fixture
+def installable_env():
+    """Pin the install environment to a plain venv with pip.
+
+    ``install_extras`` now asks ``plan_install`` for its command, so without
+    this the assertions below would describe whichever environment the suite
+    happens to run in — a uv venv or a lock-managed checkout refuses outright.
+    """
+    env = Environment(kind=EnvKind.VENV, python=sys.executable, prefix=sys.prefix,
+                      has_pip=True, writable=True, creator="venv")
+    with patch(f"{MODULE}.detect", return_value=env):
+        yield env
+
+
+@pytest.mark.usefixtures("installable_env")
 class TestInstallExtras:
     """Capture mode (``stream=False``, the TUI path): subprocess mocked —
     no real pip/network. The streamed CLI variants live in TestStreamedInstall."""
+
+    def test_uv_note_rides_on_the_message_when_output_is_captured(self):
+        """The TUI swallows prints, so the note has to come back in the
+        message; the streaming path prints it instead and must not also embed
+        it, or callers that print what they get back would show it twice."""
+        env = Environment(kind=EnvKind.VENV, python=sys.executable,
+                          prefix=sys.prefix, has_pip=False, writable=True,
+                          creator="uv", uv="/usr/bin/uv")
+        with patch(f"{MODULE}._installed_version", return_value=None), \
+                patch(f"{MODULE}.detect", return_value=env), \
+                patch(f"{MODULE}.subprocess.run"):
+            ok, message = install_extras(_reqs("Appium"), stream=False)
+        assert ok is True
+        assert "installing with uv instead" in message
 
     def test_returns_false_on_empty(self):
         with patch(f"{MODULE}.subprocess.run") as run:
@@ -223,7 +254,7 @@ class TestInstallExtras:
                 patch(f"{MODULE}.subprocess.run"):
             ok, message = install_extras(_reqs("Appium"), stream=False)
         assert ok is True
-        assert "installed successfully" in message.lower()
+        assert "Engine packages installed" in message
 
     def test_installs_version_pinned_spec(self):
         engines = _reqs("Appium")
@@ -231,7 +262,8 @@ class TestInstallExtras:
                 patch(f"{MODULE}.subprocess.run") as run:
             install_extras(engines, stream=False)
         run.assert_called_once_with(
-            [sys.executable, "-m", "pip", "install", f"{DISTRIBUTION_NAME}[appium]==1.2.3"],
+            [sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+             f"{DISTRIBUTION_NAME}[appium]==1.2.3"],
             capture_output=True, text=True, check=True, shell=False,
         )
 
@@ -256,7 +288,7 @@ class TestInstallExtras:
                 patch(f"{MODULE}.subprocess.run") as run:
             install_extras(reqs, stream=False)
         assert run.call_args.args[0] == [
-            sys.executable, "-m", "pip", "install",
+            sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
             f"{DISTRIBUTION_NAME}[appium]==1.2.3", "appium-python-client==4.2.0",
         ]
 
@@ -313,6 +345,7 @@ def _popen_result(lines: list[str], returncode: int = 0) -> MagicMock:
     return proc
 
 
+@pytest.mark.usefixtures("installable_env")
 class TestStreamedInstall:
     """Stream mode (default, the ``optics setup --install`` CLI path): output is
     echoed live and a short tail is quoted on failure."""
@@ -323,7 +356,8 @@ class TestStreamedInstall:
                 patch(f"{MODULE}.subprocess.Popen", return_value=proc) as popen:
             ok, message = install_extras(_reqs("Appium"))
         assert popen.call_args.args[0] == [
-            sys.executable, "-m", "pip", "install", f"{DISTRIBUTION_NAME}[appium]",
+            sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+            f"{DISTRIBUTION_NAME}[appium]",
         ]
         assert popen.call_args.kwargs == dict(
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -333,7 +367,10 @@ class TestStreamedInstall:
         assert "Collecting appium-python-client" in captured.out
         assert "Downloading appium..." in captured.out
         assert ok is True
-        assert message == "Engines installed successfully!"
+        # The message must not imply the Appium server itself is now running —
+        # only its Python client was installed (issue #494).
+        assert message == ("Engine packages installed. Services like the Appium "
+                           "server still need to be started separately.")
 
     def test_filters_requirement_already_satisfied_noise(self, capsys):
         proc = _popen_result([
@@ -449,7 +486,7 @@ class TestEngineInstallerApp:
         app = EngineInstallerApp()
         with patch(
             f"{MODULE}.install_extras",
-            return_value=(True, "Engines installed successfully!"),
+            return_value=(True, "Engine packages installed."),
         ) as inst:
             async with app.run_test() as pilot:
                 app.selected_engines = {"Appium": ALL_ENGINES["Appium"]}
@@ -457,7 +494,7 @@ class TestEngineInstallerApp:
                 await app.workers.wait_for_complete()
                 await pilot.pause()
                 status = app.query_one("#status", Static)
-                assert "installed successfully" in str(status.render()).lower()
+                assert "Engine packages installed" in str(status.render())
         inst.assert_called_once()
 
     async def test_failure_result_shown_and_install_reenabled(self):
@@ -482,7 +519,7 @@ class TestEngineInstallerApp:
 
         def slow_install(requests, stream=False):
             release.wait(timeout=10)
-            return True, "Engines installed successfully!"
+            return True, "Engine packages installed."
 
         app = EngineInstallerApp()
         with patch(f"{MODULE}.install_extras", side_effect=slow_install) as inst:
@@ -497,7 +534,7 @@ class TestEngineInstallerApp:
                 await app.workers.wait_for_complete()
                 await pilot.pause()
                 status = str(app.query_one("#status", Static).render())
-                assert "installed successfully" in status.lower()
+                assert "Engine packages installed" in status
         assert inst.call_args.kwargs == {"stream": False}
 
 

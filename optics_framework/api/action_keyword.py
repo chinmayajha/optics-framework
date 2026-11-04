@@ -1,5 +1,4 @@
 import collections
-import inspect
 import shlex
 import time
 import json
@@ -8,11 +7,13 @@ from optics_framework.common.logging_config import internal_logger
 from optics_framework.common.optics_builder import OpticsBuilder
 from optics_framework.common.strategies import StrategyManager
 from optics_framework.common.base_factory import InstanceFallback
-from optics_framework.common import utils
+from optics_framework.common import keyword_outcome, utils
+from optics_framework.common.agent_core import bind, runner_params, visible_params
 from optics_framework.common.ai_self_heal import (
     AISelfHealHandler, HealContext, HealKeywordSpec, KeywordExecResult,
 )
 from optics_framework.common.error import OpticsError, Code
+from optics_framework.common.screen_snapshot import read_screen
 from .verifier import Verifier
 
 # Class/tag substrings (case-insensitive) that identify a scrollable dropdown-list
@@ -152,28 +153,29 @@ def _raise_option_not_found(dropdown_element: str, option: str, interactive: Lis
 
 
 class _HealProviders:
-    """Screenshot / page-source providers for one AI self-heal attempt.
+    """Screenshot, page-source and screen-element providers for one AI self-heal attempt."""
 
-    The first ``screenshot()`` returns the seed frame captured at failure time;
-    later calls re-capture live. Both are best-effort and never raise.
-    """
-
-    def __init__(self, seed_png: bytes, strategy_manager: StrategyManager) -> None:
+    def __init__(self, seed_png: bytes, action_keyword: "ActionKeyword") -> None:
         self._seed_png: Optional[bytes] = seed_png
-        self._strategy_manager = strategy_manager
+        self._last_png: bytes | None = seed_png
+        self._action_keyword = action_keyword
 
     def screenshot(self) -> Optional[bytes]:
         if self._seed_png is not None:
             png, self._seed_png = self._seed_png, None
             return png
         try:
-            return utils.encode_numpy_to_png_bytes(self._strategy_manager.capture_screenshot())
+            self._last_png = utils.encode_numpy_to_png_bytes(self._action_keyword.strategy_manager.capture_screenshot())
         except Exception:  # noqa: BLE001 - best-effort re-capture
             return None
+        return self._last_png
+
+    def snapshot(self) -> list[dict] | None:
+        return read_screen(self._action_keyword, self._last_png)
 
     def pagesource(self) -> Optional[str]:
         try:
-            ps = self._strategy_manager.capture_pagesource()
+            ps = self._action_keyword.strategy_manager.capture_pagesource()
             return utils.strip_page_source(ps[0]) if ps else None
         except OpticsError:
             return None
@@ -203,7 +205,7 @@ class ActionKeyword:
         self.execution_dir = builder.session_config.execution_output_path
         # AI self-heal (last-resort fallback). Inert unless explicitly toggled on AND an
         # llm_models entry is enabled. Fetching the LLM is guarded: a misconfiguration
-        # (e.g. the optics-framework[llm] extra missing) must disable the feature, not
+        # (e.g. the engine's optional extra missing) must disable the feature, not
         # crash the run.
         self.ai_self_heal_enabled = bool(getattr(builder.session_config, "ai_self_heal", False))
         self._llm = None
@@ -246,7 +248,7 @@ class ActionKeyword:
         except ValueError:
             return False
 
-        providers = _HealProviders(seed_png, self.strategy_manager)
+        providers = _HealProviders(seed_png, self)
         ctx = HealContext(
             intent_keyword=func_name,
             intent_params=[str(a) for a in intent_args],
@@ -264,7 +266,9 @@ class ActionKeyword:
                 curate=True,
             )
         internal_logger.info("AI self-heal: attempting recovery for '%s' on '%s'", func_name, element)
-        result = self._ai_healer.heal(ctx, providers.screenshot, providers.pagesource)
+        result = self._ai_healer.heal(
+            ctx, providers.screenshot, providers.pagesource, snapshot_provider=providers.snapshot
+        )
         self._log_heal_outcome(result, func_name, element, intent_args)
         return result.ok
 
@@ -279,8 +283,7 @@ class ActionKeyword:
 
         Exposes ``_last_heal_info`` with a human-readable ``summary`` and a structured
         ``suggested_steps`` list that reporting layers (HTTP/MCP) can persist as
-        replacement steps. ``suggested_steps`` is the clean replayable recovery, falling
-        back to the terminal keyword when the goal was already met with no dispatched steps.
+        replacement steps. ``suggested_steps`` is the clean replayable recovery, written as CSV steps.
         """
         if not result.ok:
             internal_logger.info(
@@ -291,7 +294,10 @@ class ActionKeyword:
         kw = action.keyword if action else "?"
         internal_logger.info("AI self-heal: recovered '%s' via keyword '%s'", func_name, kw)
         self._record_successful_step(func_name, element, args)
-        steps = result.suggested_steps or ([(action.keyword, list(action.params))] if action and action.keyword else [])
+        steps = []
+        for name, params in result.suggested_steps:
+            fn = self._heal_dispatch[name]
+            steps.append((name, runner_params(fn, bind(fn, params, *params[:1], drop_first=params[:1]))))
         rendered = [self._render_heal_step(name, params) for name, params in steps]
         if rendered:
             plural = "s" if len(rendered) != 1 else ""
@@ -345,12 +351,16 @@ class ActionKeyword:
             return KeywordExecResult(ok=False, message=f"Unknown keyword: {keyword_name}")
 
         try:
+            bound = bind(method, params, *params[:1], drop_first=params[:1])
+        except ValueError as exc:
+            return KeywordExecResult(ok=False, message=str(exc))
+        try:
             # Dispatched keywords go through the same locate ladder; self-heal is
             # temporarily disabled so a heal cannot recurse into itself.
             original_enabled = self.ai_self_heal_enabled
             self.ai_self_heal_enabled = False
             try:
-                method(*params)
+                method(**bound)
             finally:
                 self.ai_self_heal_enabled = original_enabled
             return KeywordExecResult(ok=True)
@@ -369,22 +379,8 @@ class ActionKeyword:
     @staticmethod
     def _heal_keyword_signature(name: str, method: Callable) -> str:
         """Build a ghost-text signature like ``press_element <element> [repeat] [offset_x]``."""
-        try:
-            sig = inspect.signature(method)
-        except (TypeError, ValueError):
-            return name
-        parts: List[str] = [name]
-        for pname, param in sig.parameters.items():
-            if pname == "self":
-                continue
-            # Skip locate-tuning params the healer never supplies (event_name, aoi_*)
-            if pname in ("event_name", "aoi_x", "aoi_y", "aoi_width", "aoi_height"):
-                continue
-            if param.default is inspect.Parameter.empty:
-                parts.append(f"<{pname}>")
-            else:
-                parts.append(f"[{pname}]")
-        return " ".join(parts)
+        params = (f"<{p.name}>" if p.default is p.empty else f"[{p.name}]" for p in visible_params(method))
+        return " ".join([name, *params])
 
     def _capture_screenshot_safe(self) -> Any:
         """Capture a screenshot, returning None on failure (e.g. secure/protected pages)."""
@@ -430,7 +426,7 @@ class ActionKeyword:
                 screenshot_np, aoi_x, aoi_y, aoi_width, aoi_height,
                 self.execution_dir, func_name,
             )
-        self._save_screenshot_if_available(screenshot_np, f"pre-{func_name}")
+        self._save_screenshot_if_available(screenshot_np, f"pre_{func_name}")
         results = _locate_element(
             self.strategy_manager, element,
             aoi_x, aoi_y, aoi_width, aoi_height, int(index), is_aoi_used,
@@ -453,26 +449,29 @@ class ActionKeyword:
         result_count = 0
         locate_error: Optional[OpticsError] = None
 
-        try:
-            results_list = list(results)
-        except OpticsError as e:
-            # The locate generator raises when no strategy yields a result; treat that
-            # as "no results" so self-heal below gets a chance, but keep the original
-            # error as the cause instead of losing it.
-            internal_logger.debug(f"Locate generator raised for '{element}' in '{func_name}': {e}")
-            results_list = []
-            locate_error = e
-
-        for result in results_list:
+        # Lazy, so a later strategy locates only after this act fails.
+        results_iter = iter(results)
+        while True:
+            try:
+                result = next(results_iter)
+            except StopIteration:
+                break
+            except OpticsError as e:
+                # No strategy found it: leave self-heal a chance and keep this error as the cause.
+                internal_logger.debug(f"Locate generator raised for '{element}' in '{func_name}': {e}")
+                locate_error = e
+                break
             result_count += 1
             _save_annotated_for_result(result, screenshot_np, self.execution_dir, func_name)
             try:
                 ret = act(result.value)
             except Exception as e:  # noqa: BLE001 - try the next strategy's result
-                internal_logger.error(
+                internal_logger.warning(
                     f"Action '{func_name}' failed with {result.strategy.__class__.__name__}: {e}")
+                keyword_outcome.act_failed()
                 last_exception = e
                 continue
+            keyword_outcome.acted(result.strategy)
             # Success: record as a breadcrumb for any later AI self-heal (capture-then-return;
             # appending after a bare `return` would be unreachable).
             self._record_successful_step(func_name, element, intent_args)
@@ -520,10 +519,10 @@ class ActionKeyword:
                 internal_logger.info(
                     f"Pressing at coordinates ({x + int(offset_x)}, {y + int(offset_y)}) with offset ({offset_x}, {offset_y})")
                 self.driver.press_coordinates(
-                    x + int(offset_x), y + int(offset_y), event_name)
+                    x + int(offset_x), y + int(offset_y), event_name=event_name)
             else:
                 internal_logger.info(f"Pressing element '{element}'")
-                self.driver.press_element(located, int(repeat), event_name)
+                self.driver.press_element(located, int(repeat), event_name=event_name)
 
         self._locate_and_act(
             element, "press_element", act, (repeat, offset_x, offset_y),
@@ -542,7 +541,7 @@ class ActionKeyword:
         screenshot_np = self._capture_screenshot_safe()
         self._save_screenshot_if_available(screenshot_np, "press_by_percentage")
         self.driver.press_percentage_coordinates(
-            float(percent_x), float(percent_y), int(repeat), event_name
+            float(percent_x), float(percent_y), int(repeat), event_name=event_name
         )
 
     def press_by_coordinates(self, coor_x: str, coor_y: str, repeat: str = "1", event_name: Optional[str] = None) -> None:
@@ -557,15 +556,19 @@ class ActionKeyword:
         screenshot_np = self._capture_screenshot_safe()
         self._save_screenshot_if_available(screenshot_np, "press_by_coordinates")
         internal_logger.info(f'Pressing by coordinates: ({coor_x}, {coor_y})')
-        self.driver.press_coordinates(int(coor_x), int(coor_y), event_name)
+        self.driver.press_coordinates(int(coor_x), int(coor_y), event_name=event_name)
 
 
     def detect_and_press(self, element: str, timeout: str = "30", event_name: Optional[str] = None) -> None:
         """
-        Detect and press a specified element.
+        Press an element if it appears within ``timeout``; otherwise do nothing.
+
+        When the element never appears the press is skipped and the keyword still succeeds
+        (it does not raise), so use it for optional taps such as dismissing a popup that may
+        not show. Use ``press_element`` when the target must be present.
 
         :param element: The element to be detected and pressed (Image template, OCR template, or XPath).
-        :param timeout: Timeout for the detection operation.
+        :param timeout: Seconds to wait for the element to appear.
         :param event_name: The event triggering the press.
         """
         try:
@@ -664,7 +667,7 @@ class ActionKeyword:
         if container is None:
             _raise_option_not_found(element, option, after)
 
-        self._scroll_dropdown_until_found(element, option, container, float(timeout), event_name)
+        self._scroll_dropdown_until_found(element, option, container, float(timeout), event_name=event_name)
 
     def _find_option_element(self, option: str, timeout_str: str = _DROPDOWN_OPTION_CHECK_TIMEOUT) -> bool:
         """
@@ -732,7 +735,7 @@ class ActionKeyword:
         previous_hash = self._safe_pagesource_hash()
         start_time = time.time()
         while time.time() - start_time < timeout:
-            self.driver.swipe(center_x, center_y, "up", swipe_length, event_name)
+            self.driver.swipe(center_x, center_y, "up", swipe_length, event_name=event_name)
             time.sleep(1)
 
             current_hash = self._safe_pagesource_hash()
@@ -750,33 +753,39 @@ class ActionKeyword:
     # Swipe and Scroll actions
     def swipe(self, coor_x: str, coor_y: str, direction: str = 'right', swipe_length: str = "50", event_name: Optional[str] = None) -> None:
         """
-        Perform a swipe action in a specified direction.
+        Swipe from a point in a specified direction.
 
-        :param coor_x: X coordinate of the swipe.
-        :param coor_y: Y coordinate of the swipe.
-        :param direction: The swipe direction (up, down, left, right).
-        :param swipe_length: The length of the swipe.
+        ``direction`` is the way the finger moves: "up" drags bottom to top, which reveals
+        content further down. The keyword succeeds whether or not anything moved.
+
+        :param coor_x: X pixel coordinate where the swipe starts.
+        :param coor_y: Y pixel coordinate where the swipe starts.
+        :param direction: The finger direction (up, down, left, right).
+        :param swipe_length: Swipe distance in pixels.
         :param event_name: The event triggering the swipe.
         """
         screenshot_np = self._capture_screenshot_safe()
         self._save_screenshot_if_available(screenshot_np, "swipe")
         internal_logger.info(f'Swiping from ({coor_x}, {coor_y}) to the {direction} with length {swipe_length}')
-        self.driver.swipe(int(coor_x), int(coor_y), direction, int(swipe_length), event_name)
+        self.driver.swipe(int(coor_x), int(coor_y), direction, int(swipe_length), event_name=event_name)
 
     def swipe_by_percentage(self, percent_x: str, percent_y: str, direction: str = 'right', swipe_length: str = "50", event_name: Optional[str] = None) -> None:
         """
-        Perform a swipe action in a specified direction by percentage.
+        Swipe from a screen position, given in percentages, in a specified direction.
 
-        :param percent_x: X percentage of the swipe.
-        :param percent_y: Y percentage of the swipe.
-        :param direction: The swipe direction (up, down, left, right).
-        :param swipe_length: The length of the swipe.
+        ``direction`` is the way the finger moves: "up" drags bottom to top, which reveals
+        content further down. The keyword succeeds whether or not anything moved.
+
+        :param percent_x: Start X as a percentage of screen width (0-100).
+        :param percent_y: Start Y as a percentage of screen height (0-100).
+        :param direction: The finger direction (up, down, left, right).
+        :param swipe_length: Swipe distance as a percentage of screen height (up/down) or width (left/right).
         :param event_name: The event triggering the swipe.
         """
         screenshot_np = self._capture_screenshot_safe()
         self._save_screenshot_if_available(screenshot_np, "swipe_percentage")
         internal_logger.info(f'Swiping from ({percent_x}, {percent_y}) to the {direction} with length {swipe_length}')
-        self.driver.swipe_percentage(int(percent_x), int(percent_y), direction, int(swipe_length), event_name)
+        self.driver.swipe_percentage(int(percent_x), int(percent_y), direction, int(swipe_length), event_name=event_name)
 
     def swipe_seekbar_to_right_android(self, element: str, event_name: Optional[str] = None) -> None:
         """
@@ -785,6 +794,7 @@ class ActionKeyword:
         .. deprecated:: Deprecated; prefer :meth:`swipe_from_element` / :meth:`swipe`.
 
         :param element: The seekbar element (Image template, OCR template, or XPath).
+        :param event_name: The event triggering the swipe.
         """
         internal_logger.warning(
             "'Swipe Seekbar To Right Android' is deprecated; use 'Swipe From Element' instead."
@@ -792,7 +802,7 @@ class ActionKeyword:
         screenshot_np = self._capture_screenshot_safe()
         self._save_screenshot_if_available(screenshot_np, "swipe_seekbar_to_right_android")
         internal_logger.info(f'Swiping seekbar element: {element} to the right')
-        self.driver.swipe_element(element, 'right', 50, event_name)
+        self.driver.swipe_element(element, 'right', 50, event_name=event_name)
 
     def swipe_until_element_appears(self, element: str, direction: str, timeout: str, event_name: Optional[str] = None) -> None:
         """
@@ -817,7 +827,7 @@ class ActionKeyword:
             except OpticsError as e:
                 if e.code != Code.E0201:
                     raise
-            self.driver.swipe_percentage(10, 50, direction, 25, event_name)
+            self.driver.swipe_percentage(10, 50, direction, 25, event_name=event_name)
             time.sleep(3)
         if not found:
             raise OpticsError(Code.E0201, message=f"Element '{element}' did not appear after swiping {direction} for {timeout}s.")
@@ -842,11 +852,11 @@ class ActionKeyword:
             if isinstance(located, tuple):
                 x, y = located
                 internal_logger.debug(f"Swiping from coordinates ({x}, {y})")
-                self.driver.swipe(x, y, direction, int(swipe_length), event_name)
+                self.driver.swipe(x, y, direction, int(swipe_length), event_name=event_name)
             else:
                 internal_logger.debug(f"Swiping from element '{element}'")
                 self.driver.swipe_element(
-                    located, direction, int(swipe_length), event_name)
+                    located, direction, int(swipe_length), event_name=event_name)
 
         self._locate_and_act(
             element, "swipe_from_element", act, (direction, swipe_length),
@@ -855,15 +865,20 @@ class ActionKeyword:
 
     def scroll(self, direction: str, event_name: Optional[str] = None) -> None:
         """
-        Perform a scroll action in a specified direction.
+        Scroll the current view one step in a direction.
 
-        :param direction: The scroll direction (up, down, left, right).
+        ``direction`` names the way you move through the content: "down" reveals content
+        further down. Every driver supports up/down; left/right work on Appium, Selenium and
+        Playwright (BLE logs and ignores them). The keyword succeeds whether or not the view
+        actually moved.
+
+        :param direction: up, down, left or right (left/right not on BLE).
         :param event_name: The event triggering the scroll.
         """
         screenshot_np = self._capture_screenshot_safe()
         self._save_screenshot_if_available(screenshot_np, "scroll")
         internal_logger.info(f"Scrolling {direction} with event {event_name}")
-        self.driver.scroll(direction, 1000, event_name)
+        self.driver.scroll(direction, 1000, event_name=event_name)
 
     def scroll_until_element_appears(self, element: str, direction: str, timeout: str, event_name: Optional[str] = None) -> None:
         """
@@ -891,7 +906,7 @@ class ActionKeyword:
                 # Don't hide configuration/strategy issues; scrolling won't fix these.
                 if "No strategies found" in e.message or "No valid strategies found" in e.message:
                     raise
-            self.driver.scroll(direction, 1000, event_name)
+            self.driver.scroll(direction, 1000, event_name=event_name)
             time.sleep(3)
         if not found:
             raise OpticsError(Code.E0201, message=f"Element '{element}' did not appear after scrolling {direction} for {timeout}s.")
@@ -916,11 +931,11 @@ class ActionKeyword:
             if isinstance(located, tuple):
                 x, y = located
                 internal_logger.debug(f"Swiping from coordinates ({x}, {y})")
-                self.driver.swipe(x, y, direction, int(scroll_length), event_name)
+                self.driver.swipe(x, y, direction, int(scroll_length), event_name=event_name)
             else:
                 internal_logger.debug(f"Swiping from element '{element}'")
                 self.driver.swipe_element(
-                    located, direction, int(scroll_length), event_name)
+                    located, direction, int(scroll_length), event_name=event_name)
 
         self._locate_and_act(
             element, "scroll_from_element", act, (direction, scroll_length),
@@ -951,10 +966,10 @@ class ActionKeyword:
                 x, y = located
                 internal_logger.debug(f"Entering text '{text}' at coordinates ({x}, {y})")
                 self.driver.press_coordinates(x, y, event_name=event_name)
-                self.driver.enter_text(text, event_name)
+                self.driver.enter_text(text, event_name=event_name)
             else:
                 internal_logger.debug(f"Entering text '{text}' into element '{element}'")
-                self.driver.enter_text_element(located, text, event_name)
+                self.driver.enter_text_element(located, text, event_name=event_name)
 
         self._locate_and_act(
             element, "enter_text", act, (text,),
@@ -963,18 +978,16 @@ class ActionKeyword:
 
     def enter_text_direct(self, text: str, event_name: Optional[str] = None) -> None:
         """
-        Enter text using the keyboard.
+        Type text into the element that has focus, without waiting for it to accept input.
+
+        To type into a known field, use ``enter_text`` with its locator; on the web it waits until the field accepts input.
 
         :param text: The text to be entered.
         :param event_name: The event triggering the input.
         """
-        try:
-            screenshot_np = self.strategy_manager.capture_screenshot()
-            utils.save_screenshot(screenshot_np, "enter_text_keyboard", output_dir=self.execution_dir)
-        except Exception as e:
-            internal_logger.error(f"Error capturing screenshot: {e}")
+        self._save_screenshot_if_available(self._capture_screenshot_safe(), "enter_text_keyboard")
         internal_logger.info(f'Entering text directly: {text}')
-        self.driver.enter_text(text, event_name)
+        self.driver.enter_text(text, event_name=event_name)
 
     def enter_text_using_keyboard(self, text_input: str, event_name: Optional[str] = None) -> None:
         """
@@ -990,13 +1003,9 @@ class ActionKeyword:
         parsed = utils.parse_special_key(text_input)
         if parsed is not None:
             text_input = parsed
-        try:
-            screenshot_np = self.strategy_manager.capture_screenshot()
-            utils.save_screenshot(screenshot_np, "enter_text_using_keyboard", output_dir=self.execution_dir)
-        except Exception as e:
-            internal_logger.error(f"Error capturing screenshot: {e}")
+        self._save_screenshot_if_available(self._capture_screenshot_safe(), "enter_text_using_keyboard")
         internal_logger.info(f'Entering text using keyboard: {text_input}')
-        self.driver.enter_text_using_keyboard(text_input, event_name)
+        self.driver.enter_text_using_keyboard(text_input, event_name=event_name)
 
     def enter_number(self, element: str, number: str, aoi_x: str = "0", aoi_y: str = "0", aoi_width: str = "100",
                      aoi_height: str = "100", event_name: Optional[str] = None, index: str = "0") -> None:
@@ -1017,10 +1026,10 @@ class ActionKeyword:
                 x, y = located
                 internal_logger.debug(f"Entering number '{number}' at coordinates ({x}, {y})")
                 self.driver.press_coordinates(x, y, event_name=event_name)
-                self.driver.enter_text(str(number), event_name)
+                self.driver.enter_text(str(number), event_name=event_name)
             else:
                 internal_logger.debug(f"Entering number '{number}' into element '{element}'")
-                self.driver.enter_text_element(located, str(number), event_name)
+                self.driver.enter_text_element(located, str(number), event_name=event_name)
 
         self._locate_and_act(
             element, "enter_number", act, (number,),
@@ -1029,19 +1038,24 @@ class ActionKeyword:
 
     def press_keycode(self, keycode: str, event_name: Optional[str] = None) -> None:
         """
-        Press a specified keycode.
+        Press a device key by keycode, for system/hardware keys with no on-screen element.
+
+        On Android the keycode is the numeric KeyEvent code (3 = HOME, 4 = BACK, 66 = ENTER,
+        187 = RECENTS); TV platform profiles map it to their remote-control key instead.
 
         :param keycode: The keycode to be pressed.
         :param event_name: The event triggering the press.
         """
-        try:
-            screenshot_np = self.strategy_manager.capture_screenshot()
-            utils.save_screenshot(screenshot_np, "press_keycode", output_dir=self.execution_dir)
-        except Exception as e:
-            internal_logger.error(f"Error capturing screenshot: {e}")
+        self._save_screenshot_if_available(self._capture_screenshot_safe(), "press_keycode")
 
         internal_logger.info(f"Pressing keycode: {keycode}")
-        self.driver.press_keycode(keycode, event_name)
+        self.driver.press_keycode(keycode, event_name=event_name)
+
+    def go_back(self, event_name: Optional[str] = None) -> None:
+        """Go back one screen: browser history on the web, the back button on a phone."""
+        self._save_screenshot_if_available(self._capture_screenshot_safe(), "go_back")
+        internal_logger.info(f"Going back one screen with the {type(self.driver).__name__} driver (event: {event_name})")
+        self.driver.go_back(event_name=event_name)
 
 
     def clear_element_text(self, element: str, aoi_x: str = "0", aoi_y: str = "0", aoi_width: str = "100",
@@ -1063,10 +1077,10 @@ class ActionKeyword:
                 internal_logger.debug(f"Clearing text at coordinates ({x}, {y})")
                 self.driver.press_coordinates(
                     x, y, event_name=event_name)
-                self.driver.clear_text(event_name)
+                self.driver.clear_text(event_name=event_name)
             else:
                 internal_logger.debug(f"Clearing text from element '{element}'")
-                self.driver.clear_text_element(located, event_name)
+                self.driver.clear_text_element(located, event_name=event_name)
 
         self._locate_and_act(
             element, "clear_element_text", act,
@@ -1159,11 +1173,7 @@ class ActionKeyword:
         :return: The result of the script execution.
         :rtype: Any
         """
-        try:
-            screenshot_np = self.strategy_manager.capture_screenshot()
-            utils.save_screenshot(screenshot_np, "execute_script", output_dir=self.execution_dir)
-        except Exception as e:
-            internal_logger.error(f"Error capturing screenshot: {e}")
+        self._save_screenshot_if_available(self._capture_screenshot_safe(), "execute_script")
 
         script, args = self._parse_script_and_args(script_or_json)
 

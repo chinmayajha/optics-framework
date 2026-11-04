@@ -173,8 +173,12 @@ class SessionManager(SessionHandler):
         """Terminates a session and cleans up resources."""
         session: Session | None = self.sessions.pop(session_id, None)
         if session:
-            if session.driver:
-                session.driver.terminate()
+            # Every fallback driver, not just the first that answers: a later one may have a browser open.
+            for driver in getattr(session.driver, "instances", [session.driver] if session.driver else []):
+                try:
+                    driver.terminate()
+                except Exception as e:
+                    internal_logger.warning("Failed to terminate driver %s: %s", driver, e)
             session.inline_templates.clear()
             base_dir = getattr(session, "_inline_templates_dir", None)
             if base_dir:
@@ -184,3 +188,11 @@ class SessionManager(SessionHandler):
                     internal_logger.warning("Failed to remove inline templates directory %s: %s", base_dir, e)
         cleanup_junit(session_id)
         get_event_manager_registry().remove_session(session_id)
+
+    def terminate_all(self) -> None:
+        """Terminates every session; one session failing to close does not spare the rest."""
+        for session_id in list(self.sessions):
+            try:
+                self.terminate_session(session_id)
+            except Exception as e:
+                internal_logger.warning("Failed to terminate session %s on shutdown: %s", session_id, e)

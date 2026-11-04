@@ -1,9 +1,13 @@
 import subprocess  # nosec
 from typing import Any, Dict, List, Optional, Union
+from lxml import etree  # type: ignore
+from urllib.parse import urlsplit, urlunsplit
 from appium import webdriver
+from appium.webdriver.appium_connection import AppiumConnection
 from appium.webdriver.webdriver import WebDriver
 from appium.webdriver.client_config import AppiumClientConfig
 from selenium.common import WebDriverException
+from selenium.common.exceptions import InvalidSessionIdException
 from selenium.webdriver.remote.command import Command  # type: ignore
 from appium.options.android.uiautomator2.base import UiAutomator2Options
 from appium.webdriver.common.appiumby import AppiumBy
@@ -17,6 +21,7 @@ from optics_framework.common import utils
 from optics_framework.common.utils import SpecialKey
 from optics_framework.common.eventSDK import EventSDK
 from optics_framework.engines.drivers.appium_UI_helper import UIHelper
+from optics_framework.engines.drivers import appium_fields
 from optics_framework.engines.drivers.appium_platforms import (
     PlatformProfile,
     get_profile,
@@ -28,12 +33,80 @@ from optics_framework.engines.drivers.appium_platforms import (
 )
 from optics_framework.common.error import OpticsError, Code
 
+_MAX_ERROR_OUTPUT_LINES = 20
+
+
+def _summarize_command_output(output: str, max_lines: int = _MAX_ERROR_OUTPUT_LINES) -> str:
+    """Cap command output embedded in error messages so one failure can't flood the log."""
+    lines = [line for line in (output or "").splitlines() if line.strip()]
+    if not lines:
+        return "<no output>"
+    if len(lines) <= max_lines:
+        return "\n".join(lines)
+    half = max_lines // 2
+    omitted = len(lines) - max_lines
+    return "\n".join([*lines[:half], f"… ({omitted} lines omitted)", *lines[-half:]])
+
+
+_SETTINGS_CAPS = ("settings", "appium:settings")
+
+
+def _merge_capabilities(defaults: dict[str, Any], caps: dict[str, Any]) -> dict[str, Any]:
+    """Overlay ``caps`` on ``defaults``, merging Appium settings key by key."""
+    merged = {**defaults, **caps}
+    settings: dict[str, Any] = {}
+    for source in (defaults, caps):
+        for key in _SETTINGS_CAPS:
+            if isinstance(source.get(key), dict):
+                settings.update(source[key])
+    if settings:
+        for key in _SETTINGS_CAPS:
+            merged.pop(key, None)
+        merged["appium:settings"] = settings
+    return merged
+
+
+class _QueryForwardingConnection(AppiumConnection):
+    """Re-appends the server URL's query string after each command path."""
+
+    def __init__(self, query: str, client_config: AppiumClientConfig) -> None:
+        self._forwarded_query = query
+        super().__init__(client_config=client_config)
+
+    def _request(self, method, url, body=None):  # type: ignore[override]
+        parts = urlsplit(url)
+        query = "&".join(q for q in (parts.query, self._forwarded_query) if q)
+        return super()._request(method, urlunsplit(parts._replace(query=query)), body=body)
+
+
+def _command_executor_and_config(
+    server_url: str, timeout: int
+) -> tuple[str | AppiumConnection, AppiumClientConfig | None]:
+    """The ``command_executor`` and ``client_config`` to hand ``webdriver.Remote``.
+
+    A connection built here holds its own client config, so none is returned with it.
+    """
+    if "?" not in server_url and "#" not in server_url:
+        return server_url, AppiumClientConfig(remote_server_addr=server_url, timeout=timeout)
+    parts = urlsplit(server_url)
+    base_url = urlunsplit(parts._replace(query="", fragment=""))
+    connection = _QueryForwardingConnection(
+        parts.query, AppiumClientConfig(remote_server_addr=base_url, timeout=timeout)
+    )
+    return connection, None
+
 
 class Appium(DriverInterface):
     DEPENDENCY_TYPE = "driver_sources"
     NAME = "appium"
     NOT_INITIALIZED = "Appium driver is not initialized. Please start the session first."
     MOBILE_TYPE_COMMAND = "mobile: type"
+    IOS_SPECIAL_KEYS = {
+        SpecialKey.ENTER: "\n",
+        SpecialKey.TAB: "\t",
+        SpecialKey.BACKSPACE: "\b",
+        SpecialKey.SPACE: " ",
+    }
     MOBILE_PREFIX = "mobile:"
     MOBILE_CLEAR = "mobile: clear"
     CAP_APP_PACKAGE = "appium:appPackage"
@@ -118,16 +191,19 @@ class Appium(DriverInterface):
             raise OpticsError(Code.E0101, message=self.NOT_INITIALIZED)
         return self.driver
 
-    def _active_platform(self) -> str:
-        """Normalized platformName from live or configured capabilities."""
-        caps: Dict[str, Any] = {}
+    def _session_capabilities(self) -> dict[str, Any]:
+        """Live session capabilities, falling back to the configured ones."""
+        caps: dict[str, Any] = {}
         if self.driver is not None:
             try:
                 caps = self.driver.capabilities or {}
             except Exception:
                 caps = {}
-        if not caps:
-            caps = self.capabilities or {}
+        return caps or self.capabilities or {}
+
+    def _active_platform(self) -> str:
+        """Normalized platformName from live or configured capabilities."""
+        caps = self._session_capabilities()
         platform = caps.get(self.CAP_PLATFORM_NAME) or caps.get(self.CAP_APPIUM_PLATFORM_NAME)
         if not platform:
             for key, value in caps.items():
@@ -135,6 +211,13 @@ class Appium(DriverInterface):
                     platform = value
                     break
         return normalize_platform(platform)
+
+    def native_ui_platform(self) -> str | None:
+        """``android`` or ``ios`` in a native phone session; None on TVs and in browser or web view sessions."""
+        caps = self._session_capabilities()
+        platform = self._active_platform()
+        web_start = caps.get("browserName") or caps.get("autoWebview") or caps.get("appium:autoWebview")
+        return platform if platform in MOBILE and not web_start else None
 
     def _require_profile(self) -> PlatformProfile:
         profile = get_profile(self._active_platform())
@@ -219,12 +302,12 @@ class Appium(DriverInterface):
         internal_logger.debug(
             f"Connection/session-creation timeout: {self.CONNECTION_TIMEOUT}s"
         )
-        client_config = AppiumClientConfig(
-            remote_server_addr=self.appium_server_url, timeout=self.CONNECTION_TIMEOUT
+        command_executor, client_config = _command_executor_and_config(
+            self.appium_server_url, self.CONNECTION_TIMEOUT
         )
         try:
             self.driver = webdriver.Remote(
-                self.appium_server_url, options=options, client_config=client_config
+                command_executor, options=options, client_config=client_config
             )  # type: ignore
             if self.driver is None:
                 raise OpticsError(Code.E0102, message="Failed to create Appium WebDriver instance")
@@ -256,17 +339,17 @@ class Appium(DriverInterface):
         all_caps = self.capabilities.copy() if self.capabilities else {}
         self._apply_app_identifier_caps(all_caps, app_package, app_activity)
 
-        attached_sid = self._try_attach_or_clear_session_caps(all_caps, event_name)
+        attached_sid = self._try_attach_or_clear_session_caps(all_caps, event_name=event_name)
         if attached_sid is not None:
             return attached_sid
 
         options, default_options = self._get_platform_and_options(all_caps)
-        final_caps = {**default_options, **all_caps}
+        final_caps = _merge_capabilities(default_options, all_caps)
         internal_logger.debug(f"Final capabilities being applied: {final_caps}")
         for key, value in final_caps.items():
             options.set_capability(key, value)
 
-        return self._create_new_driver_session(options, event_name)
+        return self._create_new_driver_session(options, event_name=event_name)
 
     def get_session_id(self) -> Optional[str]:
         """Return the current Appium session id, if a session is active."""
@@ -278,6 +361,24 @@ class Appium(DriverInterface):
     def get_driver_session_id(self) -> Optional[str]:
         """DriverInterface-compliant getter for Appium session id."""
         return self.get_session_id()
+
+    @staticmethod
+    def is_dead_session_error(exc: BaseException) -> bool:
+        return isinstance(exc, InvalidSessionIdException)
+
+    def _is_session_alive(self) -> bool:
+        if self.driver is None:
+            return False
+        try:
+            self.driver.get_window_size()
+        except Exception as e:
+            if self.is_dead_session_error(e):
+                internal_logger.debug(
+                    "Cached Appium session %s is no longer active on the server.",
+                    self.get_session_id(),
+                )
+                return False
+        return True
 
     def _normalize_args(self, args: tuple) -> list:
         """
@@ -414,14 +515,12 @@ class Appium(DriverInterface):
         if not executor:
             raise OpticsError(Code.E0104, message="Appium server URL is not configured.")
 
-        client_config = AppiumClientConfig(
-            remote_server_addr=executor, timeout=self.CONNECTION_TIMEOUT
-        )
+        command_executor, client_config = _command_executor_and_config(executor, self.CONNECTION_TIMEOUT)
 
         class SessionAttachmentWebDriver(webdriver.Remote):
             def __init__(
                 self,
-                command_executor: str,
+                command_executor: str | AppiumConnection,
                 options: Any,
                 target_session_id: str,
                 client_config: Optional[AppiumClientConfig] = None,
@@ -446,7 +545,7 @@ class Appium(DriverInterface):
         try:
             options = self._get_options_for_attach()
             attached_driver = SessionAttachmentWebDriver(
-                command_executor=executor,
+                command_executor=command_executor,
                 options=options,
                 target_session_id=session_id,
                 client_config=client_config,
@@ -611,17 +710,25 @@ class Appium(DriverInterface):
                     return appver
 
         except Exception as e:
+            output = getattr(e, "output", "") or output
             internal_logger.info(f"Error executing adb command {dumpsys_cmd}: {e}")
             raise OpticsError(
                 Code.E0401,
-                message=f"Error executing adb command {dumpsys_cmd}: {e}. Received output = {output}.",
+                message=(
+                    f"Error executing adb command {dumpsys_cmd}: {e}. "
+                    f"Output:\n{_summarize_command_output(output)}"
+                ),
                 details=str(e),
                 cause=e
             ) from e
 
         raise OpticsError(
             Code.E0401,
-            message=f"Could not find versionName for package: {app_package}. Received output = {output}"
+            message=(
+                f"Could not find versionName for package: {app_package} in "
+                f"'{' '.join(dumpsys_cmd)}' output.\n"
+                f"Output:\n{_summarize_command_output(output)}"
+            )
         )
 
     def _get_ios_app_version(self, bundle_id_override: Optional[str] = None) -> str:
@@ -656,7 +763,10 @@ class Appium(DriverInterface):
         except Exception as e:
             raise OpticsError(
                 Code.E0401,
-                message=f"ideviceinstaller command failed: {e}. Output: {output}",
+                message=(
+                    f"ideviceinstaller command failed: {e}. "
+                    f"Output:\n{_summarize_command_output(output)}"
+                ),
                 details=str(e),
                 cause=e,
             ) from e
@@ -674,7 +784,10 @@ class Appium(DriverInterface):
 
         raise OpticsError(
             Code.E0401,
-            message=f"Could not find bundle '{bundle_id}' in ideviceinstaller output. Output: {output}",
+            message=(
+                f"Could not find bundle '{bundle_id}' in ideviceinstaller output.\n"
+                f"Output:\n{_summarize_command_output(output)}"
+            ),
         )
 
     def initialise_setup(self) -> None:
@@ -688,14 +801,21 @@ class Appium(DriverInterface):
         app_activity: Optional[str] = None,
         event_name: Optional[str] = None,
     ) -> str:
-        """Launch the app using the Appium driver."""
+        """Launch the app, activating it on the driver if a session is already alive."""
         session_id = self.get_session_id()
-        if self.driver is None:
+        if self.driver is None or not self._is_session_alive():
             session_id = self.start_session(
                 app_package=app_identifier,
                 app_activity=app_activity,
                 event_name=event_name,
             )
+        elif app_identifier:
+            try:
+                self._require_driver().activate_app(app_identifier)
+            except Exception as exc:
+                raise OpticsError(
+                    Code.E0401, message=f"Failed to launch: {app_identifier}", cause=exc
+                ) from exc
 
         internal_logger.debug(f"Launched application with event: {event_name}")
         return session_id if session_id else None
@@ -865,7 +985,7 @@ class Appium(DriverInterface):
         else:
             internal_logger.error(f"Unknown swipe direction: {direction}")
             return
-        self.swipe(start_x, start_y, direction, swipe_length, event_name)
+        self.swipe(start_x, start_y, direction, swipe_length, event_name=event_name)
 
     @supported_on(*MOBILE)
     def swipe_element(
@@ -933,29 +1053,28 @@ class Appium(DriverInterface):
         event_name: Optional[str] = None
     ) -> None:
         driver = self._require_driver()
+        fractions = {
+            "down": (0.5, 0.8, 0.5, 0.2),
+            "up": (0.5, 0.2, 0.5, 0.8),
+            "right": (0.8, 0.5, 0.2, 0.5),
+            "left": (0.2, 0.5, 0.8, 0.5),
+        }.get(direction)
+        if fractions is None:
+            internal_logger.error(f"Scroll direction '{direction}' not supported.")
+            return
         window_size = driver.get_window_size()
         width = window_size["width"]
         height = window_size["height"]
-        start_x: int
-        start_y: int
-        end_y: int
-        if direction == "up":
-            start_x = width // 2
-            start_y = int(height * 0.2)
-            end_y = int(height * 0.8)
-        elif direction == "down":
-            start_x = width // 2
-            start_y = int(height * 0.8)
-            end_y = int(height * 0.2)
-        else:
-            internal_logger.error(f"Scroll direction '{direction}' not supported.")
-            return
+        start_x, start_y, end_x, end_y = (
+            int(fraction * size)
+            for fraction, size in zip(fractions, (width, height, width, height))
+        )
         timestamp = self.event_sdk.get_current_time_for_events()
         try:
             internal_logger.debug(
-                f"Scrolling {direction} from ({start_x}, {start_y}) to ({start_x}, {end_y})"
+                f"Scrolling {direction} from ({start_x}, {start_y}) to ({end_x}, {end_y})"
             )
-            driver.swipe(start_x, start_y, start_x, end_y, duration)
+            driver.swipe(start_x, start_y, end_x, end_y, duration)
             if event_name:
                 self.event_sdk.capture_event_with_time_input(event_name, timestamp)
         except Exception as e:
@@ -981,20 +1100,67 @@ class Appium(DriverInterface):
                 element.send_keys(utils.strip_sensitive_prefix(str(text)))
         else:
             internal_logger.debug(f"Entering text '{text}' into element: {element}")
-            element.send_keys(utils.strip_sensitive_prefix(str(text)))
+            self._field_for(element).send_keys(utils.strip_sensitive_prefix(str(text)))
 
     @supported_on(*MOBILE)
     def clear_text_element(self, element: Any, event_name: Optional[str] = None) -> None:
         if event_name:
             self.event_sdk.capture_event(event_name)
         internal_logger.debug(f"Clearing text in element: {element}")
-        element.clear()
+        self._field_for(element).clear()
+
+    def _field_for(self, element: Any) -> Any:
+        """The field a located caption names, so a label locator types into its input."""
+        try:
+            class_name = element.get_attribute("className") or element.get_attribute("type") or ""
+            if appium_fields.is_field(class_name):
+                return element
+            driver = self._require_driver()
+            root = etree.fromstring(driver.page_source.encode("utf-8"))
+            caption = appium_fields.node_at(root, element.rect, element.text or "")
+            field = appium_fields.field_for(root, caption) if caption is not None else None
+            if field is None:
+                return element
+            internal_logger.info(f"'{element.text}' is not a text field; using the field it names.")
+            return driver.find_element(AppiumBy.XPATH, appium_fields.absolute_xpath(field))
+        except (WebDriverException, etree.XMLSyntaxError) as e:
+            if self.is_dead_session_error(e):
+                raise
+            internal_logger.debug(f"Looking for the field next to {element} failed: {e}")
+            return element
+
+    def _is_ios(self) -> bool:
+        return self._active_platform() == self.PLATFORM_IOS
+
+    def _enter_text_ios(self, driver: WebDriver, text: str | SpecialKey) -> None:
+        """XCUITest has no 'mobile: type' or keycodes; type into the element that has keyboard focus.
+
+        With nothing focused this raises: 'mobile: keys' answers 200 there but types nothing, which
+        would let the keyword pass without entering any text.
+        """
+        if isinstance(text, SpecialKey):
+            keys = self.IOS_SPECIAL_KEYS.get(text)
+            if keys is None:
+                raise OpticsError(Code.E0401, message=f"Special key '{text.value}' is not supported on iOS")
+        else:
+            keys = utils.strip_sensitive_prefix(str(text))
+        try:
+            focused = driver.switch_to.active_element
+        except WebDriverException as e:
+            raise OpticsError(
+                Code.E0401, message="No element has keyboard focus on iOS; tap the field before entering text", cause=e
+            ) from e
+        focused.send_keys(keys)
 
     @supported_on(*MOBILE)
     def enter_text(self, text: Union[str, SpecialKey], event_name: Optional[str] = None) -> None:
         driver = self._require_driver()
         if event_name:
             self.event_sdk.capture_event(event_name)
+
+        if self._is_ios():
+            self._enter_text_ios(driver, text)
+            return
 
         if isinstance(text, SpecialKey):
             keycode = self.KEYCODE_MAP.get(text)
@@ -1098,7 +1264,9 @@ class Appium(DriverInterface):
         driver = self._require_driver()
         try:
             timestamp = self.event_sdk.get_current_time_for_events()
-            if isinstance(text, SpecialKey):
+            if self._is_ios():
+                self._enter_text_ios(driver, text)
+            elif isinstance(text, SpecialKey):
                 self._handle_special_key_keyboard_input(driver, text)
             else:
                 self._handle_string_keyboard_input(driver, str(text))
@@ -1154,6 +1322,22 @@ class Appium(DriverInterface):
         return mapping.get(char.lower())
 
     @supported_on(*MOBILE)
+    def go_back(self, event_name: Optional[str] = None) -> None:
+        """iOS has no system back: XCUITest taps a navigation bar button, and when the screen has
+        none it only logs, which would let the keyword pass without going back.
+        """
+        driver = self._require_driver()
+        if self._is_ios() and not driver.find_elements(
+            AppiumBy.IOS_CLASS_CHAIN, "**/XCUIElementTypeNavigationBar/XCUIElementTypeButton"
+        ):
+            raise OpticsError(
+                Code.E0401, message="No navigation bar back button on this iOS screen; Go Back has nothing to tap"
+            )
+        if event_name:
+            self.event_sdk.capture_event(event_name)
+        driver.back()
+
+    @supported_on(*MOBILE)
     def get_text_element(self, element: Any) -> str:
         text = element.get_attribute("text")
         if text is None:
@@ -1161,10 +1345,16 @@ class Appium(DriverInterface):
                 text = element.get_attribute("value")
             except WebDriverException:
                 text = None
-        internal_logger.info(f"Text of element: {text}")
         if text is None:
             raise OpticsError(Code.E0401, message="Element text is None")
         return text
+
+    @supported_on(*MOBILE)
+    def is_element_checked(self, element: Any) -> bool:
+        # UiAutomator2 maps is_selected() to "selected", not "checked"; XCUITest switches report value 1/0.
+        if self._is_ios():
+            return str(element.get_attribute("value")).lower() in ("1", "true")
+        return str(element.get_attribute("checked")).lower() == "true"
 
     # helper functions
     def pixel_2_appium(self, x: int, y: int, screenshot: Any) -> Optional[tuple[int, int]]:
@@ -1210,7 +1400,7 @@ class Appium(DriverInterface):
         """
         coor_x, coor_y = int(coor_x), int(coor_y)
         internal_logger.debug(f"Pressing at coordinates: ({coor_x}, {coor_y})")
-        self.tap_at_coordinates(coor_x, coor_y, event_name)
+        self.tap_at_coordinates(coor_x, coor_y, event_name=event_name)
 
     @supported_on(*MOBILE)
     def press_percentage_coordinates(
@@ -1229,7 +1419,7 @@ class Appium(DriverInterface):
             internal_logger.debug(
                 f"Pressing at percentage coordinates: ({percentage_x}%, {percentage_y}%)"
             )
-            self.press_coordinates(x, y, event_name)
+            self.press_coordinates(x, y, event_name=event_name)
 
     @supported_on(*MOBILE)
     def press_xpath_using_coordinates(self, xpath: str, event_name: Optional[str] = None) -> None:
@@ -1248,7 +1438,7 @@ class Appium(DriverInterface):
             (x1, y1), (x2, y2) = bbox
             x_centre = (x1 + x2) // 2
             y_centre = (y1 + y2) // 2
-            self.tap_at_coordinates(x_centre, y_centre, event_name)
+            self.tap_at_coordinates(x_centre, y_centre, event_name=event_name)
         else:
             internal_logger.debug(
                 f"Bounding box not found for element with xpath: {xpath}"

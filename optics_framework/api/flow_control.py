@@ -12,7 +12,7 @@ from io import StringIO
 from jsonpath_ng import parse as jsonpath_parse
 import requests
 from optics_framework.common.config_handler import ConfigHandler
-from optics_framework.common.logging_config import internal_logger, execution_logger
+from optics_framework.common.logging_config import internal_logger, execution_logger, register_secret
 from optics_framework.common.session_manager import Session
 from optics_framework.common.models import ApiData, ElementData
 from optics_framework.common.error import OpticsError, Code
@@ -36,6 +36,18 @@ def raw_params(*indices):
         return wrapper
 
     return decorator
+
+
+def substitutes_own_vars(func: Callable[..., Any]) -> Callable[..., Any]:
+    """The keyword resolves ${name} itself, e.g. quoting it for a query, so the runner leaves it alone."""
+    func._substitutes_own_vars = True  # pylint: disable=protected-access  # type: ignore[attr-defined]
+    return func
+
+
+def defines_variable(func: Callable[..., Any]) -> Callable[..., Any]:
+    """The first param names a variable the keyword sets, so a dry run can count it as defined."""
+    func._defines_variable = True  # pylint: disable=protected-access  # type: ignore[attr-defined]
+    return func
 
 
 class FlowControl:
@@ -99,14 +111,17 @@ class FlowControl:
         self, method: Callable[..., Any], keyword: str, params: List[Any]
     ) -> Any:
         """Resolve params, log, and call the keyword method; raise on error."""
-        raw_indices = getattr(method, "_raw_param_indices", [])
-        resolved_params = [
+        elements = self._get_or_create_session_elements()
+        params, store_as = utils.split_store_as(params)
+        params = utils.substitute_inline(method, params, elements)
+        raw_indices = utils.raw_param_indices(method)
+        resolved_params = utils.unescape_vars(method, [
             p if i in raw_indices else self._resolve_param(p)
             for i, p in enumerate(params)
-        ]
+        ])
         execution_logger.info(f"Executing {keyword} with params: {resolved_params}")
         try:
-            return method(*resolved_params)
+            return utils.call_and_store(elements, method, resolved_params, {}, store_as)[0]
         except Exception as e:
             internal_logger.error(f"Error executing keyword '{keyword}': {e}")
             raise OpticsError(Code.E0401, message=f"Error executing keyword '{keyword}': {e}", cause=e)
@@ -130,6 +145,9 @@ class FlowControl:
         Not exposed on the Optics SDK — session.modules is only populated by
         CSV/YAML-driven execution; SDK/Robot Framework users should call keywords
         directly or write a real function/keyword instead.
+
+        :param module_name: The module to execute.
+        :return: Results of each keyword call in the module, in order.
         """
         module_def = self._get_validated_module_def(module_name)
         results = []
@@ -140,7 +158,13 @@ class FlowControl:
 
     @raw_params(1, 3, 5, 7, 9, 11, 13, 15)
     def run_loop(self, target: str, *args: str) -> List[Any]:
-        """Runs a loop over a target module, either by count or with variables."""
+        """Runs a loop over a target module, either by count or with variables.
+
+        :param target: The module name to execute in the loop.
+        :param args: A single count (e.g. ``"5"``), or variable-iterable pairs
+            (e.g. ``"${user}", "a|b|c"``) to iterate one value per run.
+        :return: One result list per iteration.
+        """
         internal_logger.debug(f"[RUN_LOOP] Called with target={target}, args={args}")
         self._ensure_session()
         if self.session is None:
@@ -187,10 +211,7 @@ class FlowControl:
         internal_logger.debug(f"[_LOOP_WITH_VARIABLES] min_length={min_length}, var_names={var_names}")
         if self.session is None:
             raise OpticsError(Code.E0501, message=NO_SESSION_PRESENT)
-        runner_elements = getattr(self.session, "elements", None)
-        if not isinstance(runner_elements, ElementData):
-            runner_elements = ElementData()
-            setattr(self.session, "elements", runner_elements)
+        runner_elements = self._get_or_create_session_elements()
 
         results = []
         for i in range(min_length):
@@ -266,8 +287,15 @@ class FlowControl:
         else:
             raise OpticsError(Code.E0403, message=f"Expected a list, JSON string, or pipe-separated string for iterable of variable '{variable}', got {type(iterable).__name__}.")
 
+    @substitutes_own_vars
     def condition(self, *args: str) -> Optional[List[Any]]:
-        """Evaluates conditions and executes corresponding targets."""
+        """Evaluates conditions and executes corresponding targets.
+
+        :param args: Condition-target pairs, optionally ending with an else target:
+            ``"cond1", "target1", "cond2", "target2", [else_target]``. A condition is a
+            module name (prefix ``!`` to invert) or an expression.
+        :return: Result of the matched target module, or None if nothing matched.
+        """
         internal_logger.debug(f"[CONDITION] Called with args={args}")
         self._ensure_session()
         if self.session is None:
@@ -425,6 +453,8 @@ class FlowControl:
 
         return pattern.sub(replacer, cond)
 
+    @defines_variable
+    @substitutes_own_vars
     @raw_params(0)
     def read_data(
         self, input_element: str, file_path: Union[str, List[Any]], query: str = ""
@@ -455,6 +485,7 @@ class FlowControl:
             # Always store the value in session.elements, even if not in ${name} format
             runner_elements = getattr(self.session, "elements", None)
             if isinstance(runner_elements, ElementData):
+                register_secret(runner_elements.secrets, elem_name, direct_env_value)
                 runner_elements.remove_element(elem_name)
                 runner_elements.add_element(elem_name, direct_env_value)
             else:
@@ -623,10 +654,7 @@ class FlowControl:
 
     def _resolve_query_vars(self, q):
         pattern = re.compile(VAR_PATTERN)
-        runner_elements = getattr(self.session, "elements", None)
-        if not isinstance(runner_elements, ElementData):
-            runner_elements = ElementData()
-            setattr(self.session, "elements", runner_elements)
+        runner_elements = self._get_or_create_session_elements()
         def replacer(match):
             var_name = match.group(1).strip()
             value = runner_elements.get_first(var_name)
@@ -684,6 +712,7 @@ class FlowControl:
                 store_value = ','.join(data_str)
             else:
                 store_value = data_str
+            register_secret(runner_elements.secrets, elem_name, store_value)
             internal_logger.debug(f"[READ_DATA] Storing value under element '{elem_name}': {store_value}")
             runner_elements.remove_element(elem_name)
             runner_elements.add_element(elem_name, store_value)
@@ -799,17 +828,22 @@ class FlowControl:
             pass
         raise OpticsError(Code.E0403, message=f"Query '{query}' must be a column name or integer index present in the CSV.")
 
+    @defines_variable
+    @substitutes_own_vars
     @raw_params(0)
     def evaluate(self, param1: str, param2: str) -> Any:
-        """Evaluates an expression and stores the result in session.elements."""
+        """Evaluates an expression and stores the result in session.elements.
+
+        :param param1: Variable name to store the result under, e.g. ``${result}``.
+        :param param2: Expression to evaluate; ``${var}`` refs are substituted first,
+            then run through a restricted eval (arithmetic, comparisons, ternary).
+        :return: The evaluated result (also stored as a string in session.elements).
+        """
         self._ensure_session()
         if self.session is None:
             raise OpticsError(Code.E0501, message=NO_SESSION_PRESENT)
         var_name = self._extract_variable_name(param1)
-        runner_elements = getattr(self.session, "elements", None)
-        if not isinstance(runner_elements, ElementData):
-            runner_elements = ElementData()
-            setattr(self.session, "elements", runner_elements)
+        runner_elements = self._get_or_create_session_elements()
         result = self._compute_expression(param2)
         runner_elements.remove_element(var_name)
         runner_elements.add_element(var_name, str(result))
@@ -914,6 +948,7 @@ class FlowControl:
                 continue
         raise OpticsError(Code.E0403, message=f"Unable to detect date format for input: {date_str}")
 
+    @defines_variable
     @raw_params(0)
     def date_evaluate(
         self, param1: str, param2: str, param3: str, param4: Optional[str] = "%d %B"
@@ -974,15 +1009,16 @@ class FlowControl:
         result = base_date.strftime(output_format)
 
         # Store in session.elements
-        runner_elements = getattr(self.session, "elements", None)
-        if not isinstance(runner_elements, ElementData):
-            runner_elements = ElementData()
-            setattr(self.session, "elements", runner_elements)
+        runner_elements = self._get_or_create_session_elements()
         runner_elements.add_element(var_name, result)
         return result
 
-    def invoke_api(self, api_identifier: str) -> None:
-        """Invokes an API call based on a definition from the session's API data."""
+    def invoke_api(self, api_identifier: str) -> dict[str, Any]:
+        """Invokes an API call based on a definition from the session's API data.
+
+        :param api_identifier: API to call, in ``collection.api_name`` form.
+        :return: ``status_code``, ``headers``, ``body`` and ``elapsed_ms`` of the response.
+        """
         internal_logger.debug(f"[INVOKE_API] Called with api_identifier={api_identifier}")
         self._ensure_session()
         if self.session is None:
@@ -1000,6 +1036,19 @@ class FlowControl:
         internal_logger.debug(f"[INVOKE_API] Received response: status_code={response.status_code}")
         self._process_response(response, api_def)
         internal_logger.debug(f"[INVOKE_API] Finished processing response for API: {api_name}")
+        return {
+            "status_code": response.status_code,
+            "headers": dict(response.headers),
+            "body": self._response_body(response),
+            "elapsed_ms": round(response.elapsed.total_seconds() * 1000, 3),
+        }
+
+    def _response_body(self, response: requests.Response) -> Any:
+        """Parsed JSON body, or the raw text when the response is not JSON."""
+        try:
+            return response.json()
+        except ValueError:
+            return response.text
 
     def _parse_api_identifier(self, identifier: str) -> Tuple[str, str]:
         """Parses 'collection.api' into a tuple."""
@@ -1265,11 +1314,18 @@ class FlowControl:
                 f"Could not extract '{element_name}' using path '{path}'."
             )
 
-    def _get_or_create_session_elements(self):
-        """Gets session elements or creates if not properly initialized."""
+    def _get_or_create_session_elements(self) -> ElementData:
+        """Gets session elements or creates if not properly initialized.
+
+        `optics serve` creates every session with `elements=None` and offers no way to fill
+        it, so raising here left `Invoke API` unusable there — its `extract` had nowhere to
+        put a value. `TestRunner` already substitutes an empty `ElementData` in the same
+        case, so creating one is the reading the runner has always taken.
+        """
         runner_elements = getattr(self.session, "elements", None)
         if not isinstance(runner_elements, ElementData):
-            raise OpticsError(Code.E0702, message=NO_SESSION_ELEMENT_PRESENT)
+            runner_elements = ElementData()
+            self.session.elements = runner_elements
         return runner_elements
 
     def _evaluate_jsonpath_assertions(
@@ -1310,20 +1366,14 @@ class FlowControl:
                 ) from e
 
     def _extract_from_json(self, data: Any, path: str) -> Optional[Any]:
-        """Extracts a value from a nested dictionary using a dot-separated path."""
-        current_data = data
-        for key in path.split("."):
-            internal_logger.debug(
-                f"_extract_from_json: Current data type: {type(current_data)}, Key: {key}"
-            )
-            if isinstance(current_data, dict):
-                current_data = current_data.get(key)
-                internal_logger.debug(
-                    f"_extract_from_json: Value after get('{key}'): {current_data}"
-                )
-            else:
-                internal_logger.warning(
-                    f"_extract_from_json: Data is not a dictionary at key '{key}'. Current data: {current_data}"
-                )
-                return None
-        return current_data
+        """Extracts a value using a JSONPath expression, or the bare ``a.b`` form."""
+        expression = path if path.lstrip().startswith("$") else f"$.{path}"
+        try:
+            matches = jsonpath_parse(expression).find(data)
+        except Exception as e:  # noqa: BLE001 - a bad path is a definition error, not a crash
+            internal_logger.warning(f"Invalid extract path '{path}': {e}")
+            return None
+        if not matches:
+            internal_logger.warning(f"Extract path '{path}' matched nothing in the response.")
+            return None
+        return matches[0].value

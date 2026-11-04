@@ -1,8 +1,8 @@
 import os
 from collections.abc import Mapping
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from optics_framework.common.error import OpticsError, Code
 from optics_framework.common.logging_config import initialize_handlers
@@ -14,9 +14,14 @@ class DependencyConfig(BaseModel):
     url: Optional[str] = None
     capabilities: Dict[str, Any] = Field(default_factory=dict)
 
-    class Config:
-        """Pydantic V2 configuration."""
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class NLAgentConfig(BaseModel):
+    """Settings of the natural-language agent in ``optics live``."""
+    vision: Literal["auto", "always", "never"] = "auto"
+    max_steps: int = Field(default=15, ge=1)
+    escalation_model: str = ""
 
 
 class Config(BaseModel):
@@ -39,8 +44,9 @@ class Config(BaseModel):
     exclude: Optional[List[str]] = None
     event_attributes_json: Optional[str] = None
     halt_duration: float = 0.1
-    max_attempts: int = 3
     ai_self_heal: bool = False
+    strict_element_match: bool = False
+    nl_agent: NLAgentConfig = Field(default_factory=NLAgentConfig)
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -74,11 +80,11 @@ class Config(BaseModel):
         if not self.llm_models:
             self.llm_models = [
                 {"gemini": DependencyConfig(enabled=False, url=None, capabilities={})},
+                {"openai": DependencyConfig(enabled=False, url=None, capabilities={})},
+                {"anthropic": DependencyConfig(enabled=False, url=None, capabilities={})},
             ]
 
-    class Config:
-        """Pydantic V2 configuration."""
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def get(self, key: str, default: Any = None) -> Any:
         """
