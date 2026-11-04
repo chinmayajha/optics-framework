@@ -1,0 +1,160 @@
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+          "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html>
+
+<head>
+    <meta http-equiv="Content-Type"
+          content="text/html; charset=utf-8" />
+    <title>docs/prerequisites.md – docs diff</title>
+    <style type="text/css">
+        table.diff {font-family: Menlo, Consolas, Monaco, Liberation Mono, Lucida Console, monospace; border:medium}
+        .diff_header {background-color:#e0e0e0}
+        td.diff_header {text-align:right}
+        .diff_next {background-color:#c0c0c0}
+        .diff_add {background-color:#aaffaa}
+        .diff_chg {background-color:#ffff77}
+        .diff_sub {background-color:#ffaaaa}
+    </style>
+<style>
+        body{margin:0;background:#f6f8fa;color:#1f2328;font:14px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+        .diff-shell{max-width:1600px;margin:0 auto;padding:16px}
+        table.diff[rules='groups']{table-layout:fixed;width:100%;border-collapse:collapse;border:1px solid #d1d9e0;border-radius:6px;background:#fff;margin:12px 0;font-size:12px;line-height:1.6}
+        table.diff[rules='groups'] colgroup:nth-of-type(1),table.diff[rules='groups'] colgroup:nth-of-type(4){width:14px}
+        table.diff[rules='groups'] colgroup:nth-of-type(2),table.diff[rules='groups'] colgroup:nth-of-type(5){width:52px}
+        table.diff th,table.diff td{vertical-align:top;overflow-wrap:anywhere}
+        table.diff td[nowrap]{white-space:pre-wrap;padding:1px 8px}
+        table.diff th.diff_header{text-align:left;padding:8px 10px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:13px;font-weight:600;border-bottom:1px solid #d1d9e0;background:#f6f8fa;color:#1f2328}
+        table.diff thead th{position:sticky;top:0;z-index:1}
+        td.diff_header{padding:1px 6px;text-align:right;color:#59636e;background:#f6f8fa;user-select:none}
+        td.diff_next{text-align:center;font-size:10px;line-height:1.4;background-color:#f6f8fa}
+        .diff_add{background-color:#dafbe1}
+        .diff_chg{background-color:#fff8c5}
+        .diff_sub{background-color:#ffebe9}
+        a{color:#0969da}
+        @media (prefers-color-scheme:dark){
+          body{background:#0d1117;color:#e6edf3}
+          table.diff[rules='groups']{background:#161b22;border-color:#30363d}
+          table.diff th.diff_header{border-bottom:1px solid #30363d;background:#1c2129;color:#e6edf3}
+          td.diff_header{color:#9198a1;background:#161b22}
+          td.diff_next{background-color:#21262d}
+          .diff_add{background-color:rgba(46,160,67,.25)}
+          .diff_chg{background-color:rgba(187,128,9,.25)}
+          .diff_sub{background-color:rgba(248,81,73,.22)}
+          a{color:#58a6ff}
+        }
+</style>
+</head>
+
+<body>
+<div class="diff-shell">
+    
+    <table class="diff" id="difflib_chg_to5__top"
+           cellspacing="0" cellpadding="0" rules="groups" >
+        <colgroup></colgroup> <colgroup></colgroup> <colgroup></colgroup>
+        <colgroup></colgroup> <colgroup></colgroup> <colgroup></colgroup>
+        <thead><tr><th class="diff_next"><br /></th><th colspan="2" class="diff_header">docs/prerequisites.md @ base</th><th class="diff_next"><br /></th><th colspan="2" class="diff_header">docs/prerequisites.md @ PR head</th></tr></thead>
+        <tbody>
+            <tr><td class="diff_next" id="difflib_chg_to5__0"></td><td class="diff_header" id="from5_5">5</td><td nowrap="nowrap">---</td><td class="diff_next"></td><td class="diff_header" id="to5_5">5</td><td nowrap="nowrap">---</td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_6">6</td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_6">6</td><td nowrap="nowrap"></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_7">7</td><td nowrap="nowrap">## Core install</td><td class="diff_next"></td><td class="diff_header" id="to5_7">7</td><td nowrap="nowrap">## Core install</td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_8">8</td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_8">8</td><td nowrap="nowrap"></td></tr>
+            <tr><td class="diff_next"><a href="#difflib_chg_to5__1">n</a></td><td class="diff_header" id="from5_9">9</td><td nowrap="nowrap"><span class="diff_sub">Optics requires **Python 3.12 or newer**. Install the CLI into a standard virtual environment:</span></td><td class="diff_next"><a href="#difflib_chg_to5__1">n</a></td><td class="diff_header" id="to5_9">9</td><td nowrap="nowrap"><span class="diff_add">The installer is the shortest path — it finds a suitable Python, builds a virtual environment under `~/.optics`, installs Optics into it and puts the CLI on your PATH.</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_10">10</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_11">11</td><td nowrap="nowrap"><span class="diff_add">=== "macOS / Linux"</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_12">12</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_13">13</td><td nowrap="nowrap"><span class="diff_add">    ```bash</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_14">14</td><td nowrap="nowrap"><span class="diff_add">    curl -fsSL https://optics-framework.org/install | sh</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_15">15</td><td nowrap="nowrap"><span class="diff_add">    ```</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_16">16</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_17">17</td><td nowrap="nowrap"><span class="diff_add">    Options are `--version`, `--extra appium,llm`, `--dir`, `--no-modify-path`, `--dry-run` and `--uninstall`; pass them after `sh -s --`. The `-f` matters: without it, curl would pipe an HTTP error page into your shell.</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_18">18</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_19">19</td><td nowrap="nowrap"><span class="diff_add">=== "Windows"</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_20">20</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_21">21</td><td nowrap="nowrap"><span class="diff_add">    ```powershell</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_22">22</td><td nowrap="nowrap"><span class="diff_add">    irm https://optics-framework.org/install.ps1 | iex</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_23">23</td><td nowrap="nowrap"><span class="diff_add">    ```</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_24">24</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_25">25</td><td nowrap="nowrap"><span class="diff_add">    Piping into `iex` passes no parameters, so the same options are environment variables — set them first:</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_26">26</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_27">27</td><td nowrap="nowrap"><span class="diff_add">    ```powershell</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_28">28</td><td nowrap="nowrap"><span class="diff_add">    $env:OPTICS_EXTRA = "appium,llm"</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_29">29</td><td nowrap="nowrap"><span class="diff_add">    irm https://optics-framework.org/install.ps1 | iex</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_30">30</td><td nowrap="nowrap"><span class="diff_add">    ```</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_31">31</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_32">32</td><td nowrap="nowrap"><span class="diff_add">    `OPTICS_VERSION`, `OPTICS_INSTALL_DIR` and `OPTICS_NO_MODIFY_PATH` work the same way. Downloaded as a file, the script takes `-Version`, `-Extra`, `-Dir`, `-NoModifyPath`, `-DryRun` and `-Uninstall` directly.</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_33">33</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_34">34</td><td nowrap="nowrap"><span class="diff_add">### Installing it yourself</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_35">35</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_36">36</td><td nowrap="nowrap"><span class="diff_add">Optics requires **Python 3.12 or newer**. To manage the environment yourself — in CI, or inside an existing project:</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_10">10</td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_37">37</td><td nowrap="nowrap"></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_11">11</td><td nowrap="nowrap">```bash</td><td class="diff_next"></td><td class="diff_header" id="to5_38">38</td><td nowrap="nowrap">```bash</td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_12">12</td><td nowrap="nowrap">python3 -m venv venv</td><td class="diff_next"></td><td class="diff_header" id="to5_39">39</td><td nowrap="nowrap">python3 -m venv venv</td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_13">13</td><td nowrap="nowrap">source venv/bin/activate     # Windows: venv\Scripts\activate</td><td class="diff_next"></td><td class="diff_header" id="to5_40">40</td><td nowrap="nowrap">source venv/bin/activate     # Windows: venv\Scripts\activate</td></tr>
+        </tbody>        
+        <tbody>
+            <tr><td class="diff_next" id="difflib_chg_to5__1"></td><td class="diff_header" id="from5_16">16</td><td nowrap="nowrap">```</td><td class="diff_next"></td><td class="diff_header" id="to5_43">43</td><td nowrap="nowrap">```</td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_17">17</td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_44">44</td><td nowrap="nowrap"></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_18">18</td><td nowrap="nowrap">!!! warning "Use a standard virtualenv, not Conda"</td><td class="diff_next"></td><td class="diff_header" id="to5_45">45</td><td nowrap="nowrap">!!! warning "Use a standard virtualenv, not Conda"</td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_19">19</td><td nowrap="nowrap">    `easyocr` and `optics-framework` have conflicting `numpy` requirements (1.x vs 2.x) under Conda. Use a plain `venv`.</td><td class="diff_next"></td><td class="diff_header" id="to5_46">46</td><td nowrap="nowrap">    `easyocr` and `optics-framework` have conflicting `numpy` requirements (1.x vs 2.x) under Conda. Use a plain `venv`.</td></tr>
+            <tr><td class="diff_next"><a href="#difflib_chg_to5__2">n</a></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"><a href="#difflib_chg_to5__2">n</a></td><td class="diff_header" id="to5_47">47</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_48">48</td><td nowrap="nowrap"><span class="diff_add">### Where Optics can install engine extras</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_49">49</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_50">50</td><td nowrap="nowrap"><span class="diff_add">`optics setup` and `optics quickstart` add engine extras to the environment Optics is running in. Not every environment allows that, so Optics checks first and tells you which command to use instead. `optics doctor` reports the same thing in its `environment` row, before you hit it.</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_51">51</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_52">52</td><td nowrap="nowrap"><span class="diff_add">| Your environment | `optics setup --install &lt;engine&gt;` | Add engines with |</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_53">53</td><td nowrap="nowrap"><span class="diff_add">|---|---|---|</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_54">54</td><td nowrap="nowrap"><span class="diff_add">| `python -m venv`, `virtualenv` | installs with pip | — |</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_55">55</td><td nowrap="nowrap"><span class="diff_add">| `uv venv` | installs with uv (these venvs have no pip) | — |</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_56">56</td><td nowrap="nowrap"><span class="diff_add">| `uv tool install` / `uvx` | refuses | `uv tool install "optics-framework[&lt;engine&gt;]"` |</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_57">57</td><td nowrap="nowrap"><span class="diff_add">| `pipx install` | refuses | `pipx install --force "optics-framework[&lt;engine&gt;]"` |</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_58">58</td><td nowrap="nowrap"><span class="diff_add">| uv / Poetry / PDM / Pipenv project | refuses | `uv add`, `poetry add`, `pdm add`, `pipenv install` |</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_59">59</td><td nowrap="nowrap"><span class="diff_add">| System Python on Debian 12+, Ubuntu 23.04+, Fedora, Arch, Homebrew | refuses ([PEP 668][pep668]) | create a venv first |</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_60">60</td><td nowrap="nowrap"><span class="diff_add">| Conda | refuses | use a plain `venv` (see the warning above) |</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_61">61</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_62">62</td><td nowrap="nowrap"><span class="diff_add">[pep668]: https://peps.python.org/pep-0668/</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_63">63</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_64">64</td><td nowrap="nowrap"><span class="diff_add">The refusals are deliberate. Tool installers rebuild their environment on every upgrade, and project managers prune anything their lockfile does not list — so an install that appeared to succeed would silently vanish on the next `uv tool upgrade` or `uv sync`.</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_65">65</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_66">66</td><td nowrap="nowrap"><span class="diff_add">!!! note "Tool installs give you the CLI, not the library"</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_67">67</td><td nowrap="nowrap"><span class="diff_add">    `pipx install optics-framework` and `uv tool install optics-framework` put the `optics` command on your PATH in an isolated environment. That covers `optics execute`, `optics live`, `optics serve` and `optics mcp`.</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_68">68</td><td nowrap="nowrap"><span class="diff_add"> </span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_69">69</td><td nowrap="nowrap"><span class="diff_add">    They do **not** make `optics_framework` importable from your own code, so the [Python SDK](usage/library_usage.md) and [Robot Framework](usage/robot_usage.md) library (`Library    optics_framework.optics.Optics`) will not find it. For those, install into the same virtual environment your tests run in.</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_20">20</td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_70">70</td><td nowrap="nowrap"></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_21">21</td><td nowrap="nowrap">---</td><td class="diff_next"></td><td class="diff_header" id="to5_71">71</td><td nowrap="nowrap">---</td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_22">22</td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_72">72</td><td nowrap="nowrap"></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_23">23</td><td nowrap="nowrap">## Engine backends (extras)</td><td class="diff_next"></td><td class="diff_header" id="to5_73">73</td><td nowrap="nowrap">## Engine backends (extras)</td></tr>
+        </tbody>        
+        <tbody>
+            <tr><td class="diff_next" id="difflib_chg_to5__2"></td><td class="diff_header" id="from5_57">57</td><td nowrap="nowrap">- **iOS (Appium):** macOS + Xcode and the [Appium XCUITest driver](https://appium.github.io/appium-xcuitest-driver/).</td><td class="diff_next"></td><td class="diff_header" id="to5_107">107</td><td nowrap="nowrap">- **iOS (Appium):** macOS + Xcode and the [Appium XCUITest driver](https://appium.github.io/appium-xcuitest-driver/).</td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_58">58</td><td nowrap="nowrap">- **Web (Playwright):** `optics setup --install playwright` runs the [browser download](https://playwright.dev/python/docs/browsers) for you.</td><td class="diff_next"></td><td class="diff_header" id="to5_108">108</td><td nowrap="nowrap">- **Web (Playwright):** `optics setup --install playwright` runs the [browser download](https://playwright.dev/python/docs/browsers) for you.</td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_59">59</td><td nowrap="nowrap">- **Web (Selenium):** a running [Selenium/WebDriver server](https://www.selenium.dev/documentation/grid/); set its URL in `config.yaml`.</td><td class="diff_next"></td><td class="diff_header" id="to5_109">109</td><td nowrap="nowrap">- **Web (Selenium):** a running [Selenium/WebDriver server](https://www.selenium.dev/documentation/grid/); set its URL in `config.yaml`.</td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_60">60</td><td nowrap="nowrap">- **OCR (`pytesseract`):** a system [Tesseract binary](https://tesseract-ocr.github.io/tessdoc/Installation.html).</td><td class="diff_next"></td><td class="diff_header" id="to5_110">110</td><td nowrap="nowrap">- **OCR (`pytesseract`):** a system [Tesseract binary](https://tesseract-ocr.github.io/tessdoc/Installation.html).</td></tr>
+            <tr><td class="diff_next"><a href="#difflib_chg_to5__top">t</a></td><td class="diff_header" id="from5_61">61</td><td nowrap="nowrap"><span class="diff_sub">- **OCR (`google-vision`) / LLM (`llm`):** cloud credentials in the environment (`GOOGLE_APPLICATION_CREDENTIALS`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`). Never commit keys.</span></td><td class="diff_next"><a href="#difflib_chg_to5__top">t</a></td><td class="diff_header" id="to5_111">111</td><td nowrap="nowrap"><span class="diff_add">- **OCR (`google-vision`):** Google Cloud credentials in the environment (`GOOGLE_APPLICATION_CREDENTIALS`).</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header"></td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_112">112</td><td nowrap="nowrap"><span class="diff_add">- **LLM (`gemini`, `openai`, `anthropic`):** the provider's API key in the environment (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), or a local OpenAI-compatible server such as Ollama. Never commit keys.</span></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_62">62</td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_113">113</td><td nowrap="nowrap"></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_63">63</td><td nowrap="nowrap">Point your project `config.yaml` at the device/browser once the tooling is running — see [Configuration](configuration.md).</td><td class="diff_next"></td><td class="diff_header" id="to5_114">114</td><td nowrap="nowrap">Point your project `config.yaml` at the device/browser once the tooling is running — see [Configuration](configuration.md).</td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_64">64</td><td nowrap="nowrap"></td><td class="diff_next"></td><td class="diff_header" id="to5_115">115</td><td nowrap="nowrap"></td></tr>
+            <tr><td class="diff_next"></td><td class="diff_header" id="from5_65">65</td><td nowrap="nowrap">---</td><td class="diff_next"></td><td class="diff_header" id="to5_116">116</td><td nowrap="nowrap">---</td></tr>
+        </tbody>
+    </table>
+    <table class="diff" summary="Legends">
+        <tr> <th colspan="2"> Legends </th> </tr>
+        <tr> <td> <table border="" summary="Colors">
+                      <tr><th> Colors </th> </tr>
+                      <tr><td class="diff_add"> Added </td></tr>
+                      <tr><td class="diff_chg">Changed</td> </tr>
+                      <tr><td class="diff_sub">Deleted</td> </tr>
+                  </table></td>
+             <td> <table border="" summary="Links">
+                      <tr><th colspan="2"> Links </th> </tr>
+                      <tr><td>(f)irst change</td> </tr>
+                      <tr><td>(n)ext change</td> </tr>
+                      <tr><td>(t)op</td> </tr>
+                  </table></td> </tr>
+    </table>
+</div>
+</body>
+
+</html>
