@@ -819,7 +819,7 @@ class UIHelper:
             actions.append("long")
         if attrs.get("checkable") == "true" or any(f in cls for f in TOGGLE_CLASS_FRAGMENTS):
             actions.append("toggle")
-        if attrs.get("editable") == "true" or any(f in cls for f in INPUT_CLASS_FRAGMENTS):
+        if self._is_input(node):
             actions.append("input")
         if attrs.get("scrollable") == "true" or any(f in cls for f in SCROLL_CLASS_FRAGMENTS):
             actions.append("scroll")
@@ -861,7 +861,8 @@ class UIHelper:
         return " ".join(dict.fromkeys(parts))[:COMPACT_LABEL_MAX_CHARS]
 
     def _folds_text(self, node: etree.Element) -> bool:
-        # A clickable/toggle/input container folds its text; a scroll container or a desktop window does not.
+        # A button's child texts are its name, so they fold into its label. A scroll container holds many items, and a
+        # desktop window is clickable but holds the whole app, so folding there would hide every text on the screen.
         return node.tag not in DESKTOP_CONTAINER_TAGS and self._is_actionable(node) and self._element_actions(node) != ["scroll"]
 
     def _has_folding_ancestor(self, node: etree.Element) -> bool:
@@ -1281,15 +1282,8 @@ class UIHelper:
         return "Button" in tag
 
     def _is_input(self, node: etree.Element) -> bool:
-        """Check if element is an input/text field."""
-        tag = node.tag or ""
-        # Android: EditText, TextView (when editable/focusable)
-        # iOS: XCUIElementTypeTextField, XCUIElementTypeSecureTextField, XCUIElementTypeTextView
-        if any(t in tag for t in ["TextField", "EditText", "SecureTextField"]):
-            return True
-        if "TextView" in tag and node.attrib.get("focusable") == "true":
-            return True
-        return False
+        """A field the user types into: editable, or of an input class. The compact list and the filters share it."""
+        return node.attrib.get("editable") == "true" or any(f in self._class_of(node) for f in INPUT_CLASS_FRAGMENTS)
 
     def _is_image(self, node: etree.Element) -> bool:
         """Check if element is an image."""
