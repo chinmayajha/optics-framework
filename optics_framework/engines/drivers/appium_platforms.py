@@ -24,13 +24,22 @@ IOS = "ios"
 TIZEN = "tizentv"   # Samsung Tizen TV  (platformName: TizenTV)
 WEBOS = "lgtv"      # LG webOS TV       (platformName: LGTV)
 
+MAC = "mac"
+WINDOWS = "windows"
+LINUX = "linux"
+
 #: Phone/tablet platforms — the historical Appium surface. Used by ``@supported_on``
 #: to fence off touch actions that a TV D-pad cannot perform.
 MOBILE = (ANDROID, IOS)
+#: Desktop platforms, served by the Xa11y Appium driver.
+DESKTOP = (MAC, WINDOWS, LINUX)
+#: Platforms with a pointer and a native element tree.
+POINTER = MOBILE + DESKTOP
 
 # --- keycode delivery strategies --------------------------------------------
 KEYCODE_ANDROID_INT = "android_int"   # driver.press_keycode(int(code))
 KEYCODE_RC_NAMED = "rc_named"         # driver.execute_script("<vendor>: pressKey", {...})
+KEYCODE_CHORD = "chord"               # driver.execute_script("xa11y: chord", {"keys": "cmd+s"})
 
 # Defaults shared by the mobile (Android/iOS) session; TV profiles keep their own
 # minimal set because these mobile-oriented caps are rejected by the TV drivers.
@@ -79,6 +88,7 @@ class PlatformProfile:
     rc_extra_payload: dict[str, Any] = field(default_factory=dict)
     web_ui: bool = False  # the session's own context is the app's DOM, with no native tree
     native_screenshot: bool = True
+    select_all_chord: str | None = None  # desktop: clear_text selects all with this chord, then deletes
 
     def resolve_rc_key(self, keycode: str) -> str:
         key = str(keycode).strip().upper()
@@ -209,3 +219,15 @@ register_profile(PlatformProfile(
     rc_extra_payload={"duration": 200},
     web_ui=True,
 ))
+
+# Desktop apps through appium-xa11y-driver: keys are chords, text goes to the focused control.
+for _name, _label, _select_all in ((MAC, "macOS", "cmd+a"), (WINDOWS, "Windows", "ctrl+a"), (LINUX, "Linux", "ctrl+a")):
+    register_profile(PlatformProfile(
+        name=_name,
+        label=_label,
+        options_factory=AppiumOptions,
+        app_id_caps=("app", "appium:app"),
+        keycode_strategy=KEYCODE_CHORD,
+        default_options={"automationName": "Xa11y", "newCommandTimeout": 3600},
+        select_all_chord=_select_all,
+    ))

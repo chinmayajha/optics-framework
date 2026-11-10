@@ -30,6 +30,7 @@ from selenium.webdriver.common.action_chains import ActionChains  # type: ignore
 from selenium.webdriver.common.actions.action_builder import ActionBuilder  # type: ignore
 from selenium.webdriver.common.actions.pointer_input import PointerInput  # type: ignore
 from selenium.webdriver.common.actions import interaction  # type: ignore
+from selenium.webdriver.common.actions.wheel_input import ScrollOrigin  # type: ignore
 from optics_framework.common.driver_interface import DriverInterface
 from optics_framework.common.logging_config import internal_logger, redact_secret_values
 from optics_framework.common import utils
@@ -45,7 +46,10 @@ from optics_framework.engines.drivers.appium_platforms import (
     supported_platforms,
     supported_on,
     ANDROID,
+    DESKTOP,
     MOBILE,
+    POINTER,
+    KEYCODE_CHORD,
     KEYCODE_RC_NAMED,
 )
 from optics_framework.common.error import OpticsError, Code
@@ -1028,7 +1032,7 @@ class Appium(DriverInterface):
         return self.driver
 
     # APPIUM api wrappers
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def click_element(self, element: Any, event_name: Optional[str] = None) -> None:
         """
         Click on the specified element using Appium's click method.
@@ -1042,7 +1046,7 @@ class Appium(DriverInterface):
         except Exception as e:
             internal_logger.debug(e)
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def tap_at_coordinates(self, x: int, y: int, event_name: Optional[str] = None) -> None:
         """
         Simulates a tap gesture at the specified screen coordinates using Appium's `tap` method.
@@ -1057,7 +1061,7 @@ class Appium(DriverInterface):
             self.event_sdk.capture_event_with_time_input(event_name, timestamp)
         internal_logger.debug(f"Tapped at coordinates ({x}, {y})")
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def swipe(
         self,
         x_coor: int,
@@ -1126,7 +1130,7 @@ class Appium(DriverInterface):
             )
 
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def swipe_percentage(
         self,
         x_percentage: int,
@@ -1151,7 +1155,7 @@ class Appium(DriverInterface):
             return
         self.swipe(start_x, start_y, direction, swipe_length, event_name=event_name)
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def swipe_element(
         self,
         element: Any,
@@ -1209,7 +1213,7 @@ class Appium(DriverInterface):
                 f"Failed to perform TouchAction swipe from ({start_x}, {start_y}) to ({end_x}, {end_y}): {e}"
             )
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def scroll(
         self,
         direction: str,
@@ -1226,6 +1230,8 @@ class Appium(DriverInterface):
         if fractions is None:
             internal_logger.error(f"Scroll direction '{direction}' not supported.")
             return
+        if self._is_desktop():
+            return self._wheel_scroll(driver, direction, event_name)
         window_size = driver.get_window_size()
         width = window_size["width"]
         height = window_size["height"]
@@ -1245,30 +1251,31 @@ class Appium(DriverInterface):
             internal_logger.debug(f"Failed to scroll {direction}: {e}")
 
     @_on_tv
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def enter_text_element(self, element: Any, text: Union[str, SpecialKey], event_name: Optional[str] = None) -> None:
         if event_name:
             self.event_sdk.capture_event(event_name)
 
         if isinstance(text, SpecialKey):
-            keycode = self.KEYCODE_MAP.get(text)
-            if keycode:
-                internal_logger.debug(
-                    f"Pressing Detected SpecialKey in element: {text}. Keycode: {keycode}"
-                )
-                internal_logger.debug(f"Pressing SpecialKey in element: {text}")
-                driver = self._require_driver()
-                driver.press_keycode(keycode)
-            else:
-                internal_logger.warning(f"Unknown special key in element: {text}")
-                internal_logger.debug(f"Unknown special key in element, treating as text: {text}")
-                element.send_keys(utils.strip_sensitive_prefix(str(text)))
+            self._press_special_key_in(element, text)
         else:
             internal_logger.debug(f"Entering text into element: {element}")
             self._field_for(element).send_keys(utils.strip_sensitive_prefix(str(text)))
 
+    def _press_special_key_in(self, element: Any, key: SpecialKey) -> None:
+        keycode = self.KEYCODE_MAP.get(key)
+        if self._is_desktop():
+            self._type_desktop(self._require_driver(), key)
+        elif keycode:
+            internal_logger.debug(f"Pressing SpecialKey in element: {key}. Keycode: {keycode}")
+            self._require_driver().press_keycode(keycode)
+        else:
+            internal_logger.warning(f"Unknown special key in element: {key}")
+            internal_logger.debug(f"Unknown special key in element, treating as text: {key}")
+            element.send_keys(utils.strip_sensitive_prefix(str(key)))
+
     @_on_tv
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def clear_text_element(self, element: Any, event_name: Optional[str] = None) -> None:
         if event_name:
             self.event_sdk.capture_event(event_name)
@@ -1297,6 +1304,30 @@ class Appium(DriverInterface):
 
     def _is_ios(self) -> bool:
         return self._active_platform() == self.PLATFORM_IOS
+
+    def _is_desktop(self) -> bool:
+        return self._active_platform() in DESKTOP
+
+    def _type_desktop(self, driver: WebDriver, text: str | SpecialKey) -> None:
+        """Desktop keys are chords named like SpecialKey values; text goes to the control with keyboard focus."""
+        if isinstance(text, SpecialKey):
+            driver.execute_script("xa11y: chord", {"keys": text.value})
+        else:
+            driver.execute_script("xa11y: typeText", {"text": utils.strip_sensitive_prefix(str(text))})
+
+    def _wheel_scroll(self, driver: WebDriver, direction: str, event_name: Optional[str]) -> None:
+        """Scroll the app's window with the mouse wheel; a touch swipe would select text on a desktop."""
+        windows = driver.execute_script("xa11y: listWindows")
+        bounds = next((w for w in windows if w.get("active")), windows[0])["bounds"]
+        dx, dy = {"down": (0, 1), "up": (0, -1), "right": (1, 0), "left": (-1, 0)}[direction]
+        origin = ScrollOrigin.from_viewport(
+            int(bounds["x"] + bounds["width"] / 2), int(bounds["y"] + bounds["height"] / 2)
+        )
+        ActionChains(driver).scroll_from_origin(
+            origin, int(dx * bounds["width"] * 0.6), int(dy * bounds["height"] * 0.6)
+        ).perform()
+        if event_name:
+            self.event_sdk.capture_event(event_name)
 
     def _enter_text_ios(self, driver: WebDriver, text: str | SpecialKey) -> None:
         """XCUITest has no 'mobile: type' or keycodes; type into the element that has keyboard focus.
@@ -1336,7 +1367,7 @@ class Appium(DriverInterface):
             last = top
             time.sleep(_POLL_S)
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def enter_text(self, text: Union[str, SpecialKey], event_name: Optional[str] = None) -> None:
         driver = self._require_driver()
         if event_name:
@@ -1344,6 +1375,9 @@ class Appium(DriverInterface):
 
         if self._is_ios():
             self._enter_text_ios(driver, text)
+            return
+        if self._is_desktop():
+            self._type_desktop(driver, text)
             return
 
         if isinstance(text, SpecialKey):
@@ -1364,12 +1398,17 @@ class Appium(DriverInterface):
             internal_logger.debug(f"Entering {len(text_to_send)} characters")
             driver.execute_script(self.MOBILE_TYPE_COMMAND, {"text": text_to_send})
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def clear_text(self, event_name: Optional[str] = None) -> None:
         driver = self._require_driver()
         if event_name:
             self.event_sdk.capture_event(event_name)
         internal_logger.debug("Clearing text input")
+        select_all = self._require_profile().select_all_chord
+        if select_all:
+            driver.execute_script("xa11y: chord", {"keys": select_all})
+            driver.execute_script("xa11y: chord", {"keys": "backspace"})
+            return
         driver.execute_script(self.MOBILE_CLEAR)
 
     def press_keycode(self, keycode: str, event_name: Optional[str] = None) -> None:
@@ -1383,6 +1422,8 @@ class Appium(DriverInterface):
             payload = {"key": rc_key, **profile.rc_extra_payload}
             internal_logger.debug(f"{profile.rc_command} -> {payload}")
             driver.execute_script(profile.rc_command, payload)
+        elif profile.keycode_strategy == KEYCODE_CHORD:
+            driver.execute_script("xa11y: chord", {"keys": utils.strip_sensitive_prefix(str(keycode))})
         else:
             driver.press_keycode(int(utils.strip_sensitive_prefix(keycode)))
 
@@ -1433,7 +1474,7 @@ class Appium(DriverInterface):
             internal_logger.debug("press_keycode failed for a character, falling back to script typing")
             driver.execute_script(self.MOBILE_TYPE_COMMAND, {"text": ch})
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def enter_text_using_keyboard(
         self,
         text: Union[str, SpecialKey],
@@ -1444,6 +1485,8 @@ class Appium(DriverInterface):
             timestamp = self.event_sdk.get_current_time_for_events()
             if self._is_ios():
                 self._enter_text_ios(driver, text)
+            elif self._is_desktop():
+                self._type_desktop(driver, text)
             elif isinstance(text, SpecialKey):
                 self._handle_special_key_keyboard_input(driver, text)
             else:
@@ -1516,7 +1559,7 @@ class Appium(DriverInterface):
         driver.back()
 
     @_on_tv
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def get_text_element(self, element: Any) -> str:
         text = element.get_attribute("text")
         if text is None:
@@ -1528,7 +1571,7 @@ class Appium(DriverInterface):
             raise OpticsError(Code.E0401, message="Element text is None")
         return text
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def is_element_checked(self, element: Any) -> bool:
         # UiAutomator2 maps is_selected() to "selected", not "checked"; XCUITest switches report value 1/0.
         if self._is_ios():
@@ -1554,7 +1597,7 @@ class Appium(DriverInterface):
     # action keywords
 
     @_on_tv
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def press_element(self, element: Any, repeat: int, event_name: Optional[str] = None) -> None:
         timestamp = None
         for _ in range(repeat):
@@ -1567,7 +1610,7 @@ class Appium(DriverInterface):
             self.event_sdk.capture_event_with_time_input(event_name, timestamp)
             internal_logger.debug("Clicked on element: %s at %s", element, timestamp)
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def press_coordinates(self, coor_x: int, coor_y: int, event_name: Optional[str] = None) -> None:
         """
         Press an element by absolute coordinates.
@@ -1582,7 +1625,7 @@ class Appium(DriverInterface):
         internal_logger.debug(f"Pressing at coordinates: ({coor_x}, {coor_y})")
         self.tap_at_coordinates(coor_x, coor_y, event_name=event_name)
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def press_percentage_coordinates(
         self,
         percentage_x: float,
@@ -1601,7 +1644,7 @@ class Appium(DriverInterface):
             )
             self.press_coordinates(x, y, event_name=event_name)
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def press_xpath_using_coordinates(self, xpath: str, event_name: Optional[str] = None) -> None:
         """
         Press an element by its XPath using the bounding box coordinates.

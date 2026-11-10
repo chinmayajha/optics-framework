@@ -39,6 +39,7 @@ class Row:
     cls: str
     act: tuple[str, ...]
     rid: str = ""
+    rid_attr: str = "resource-id"
     loc: str = ""
     bounds: tuple[int, int, int, int] | None = None
     secret: bool = False
@@ -178,6 +179,13 @@ def _holds_value(act: tuple[str, ...], cls: str, label: str) -> bool:
     return "input" in act or ("toggle" in act and (cls == "ToggleButton" or fold(label) in ("on", "off")))
 
 
+def _native_id(rid: str, extra: dict, web: bool) -> tuple[str, str]:
+    """The id and its page-source attribute; a desktop tree names its stable id ``id``."""
+    if not rid and not web and extra.get("id"):
+        return str(extra["id"]), "id"
+    return rid, "resource-id"
+
+
 def normalize(el: dict, before: dict | None = None) -> dict | None:
     """One element from any element-list shape as Row fields, or None to drop it; ``before`` is the row above it."""
     if not isinstance(el, dict):
@@ -188,6 +196,7 @@ def normalize(el: dict, before: dict | None = None) -> dict | None:
     cls = short.removeprefix("XCUIElementType") or short
     loc = str(el.get("loc") or ("" if "act" in el else el.get("xpath")) or "")
     web = _is_web(loc, cls)
+    rid, rid_attr = _native_id(rid, extra, web)
     own_id = rid.rsplit("/", 1)[-1]
     if not web and label in {rid, own_id, raw_cls, cls} - {""}:
         label = ""
@@ -203,7 +212,7 @@ def normalize(el: dict, before: dict | None = None) -> dict | None:
     # A native label that differs from its hint is the typed value, so the hint (even empty) names the row.
     name = hint if label and not web and holds_value and fold(label) != fold(hint) else label
     return {
-        "label": label, "cls": cls, "act": act, "rid": rid, "loc": loc, "bounds": _bounds(el.get("bounds")),
+        "label": label, "cls": cls, "act": act, "rid": rid, "rid_attr": rid_attr, "loc": loc, "bounds": _bounds(el.get("bounds")),
         "secret": secret, "hint": hint, "holds_value": holds_value, "web": web, "name": name,
         "offscreen": el.get("offscreen") is True, "tag": raw_cls,
     }
@@ -426,7 +435,7 @@ def _locator_rungs(row: Row, snap: Snapshot) -> list[str]:
         if row.web:
             rung = f"css=#{row.rid}" if _CSS_ID_RE.match(row.rid) else f'css=[id="{row.rid}"]'
         else:
-            rung = f'//*[@resource-id="{row.rid}"]'
+            rung = f'//*[@{row.rid_attr}="{row.rid}"]'
         if rung not in rungs and rung.removeprefix("css=") not in rungs:
             rungs.append(rung)
     return rungs

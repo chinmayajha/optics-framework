@@ -30,7 +30,10 @@ TAP_CLASS_FRAGMENTS = (
     "XCUIElementTypeKey",
 )
 TOGGLE_CLASS_FRAGMENTS = ("Switch", "CheckBox", "RadioButton", "ToggleButton")
-INPUT_CLASS_FRAGMENTS = ("EditText", "TextField", "SecureTextField", "AutoCompleteTextView", "SearchField")
+DESKTOP_CONTAINER_TAGS = frozenset({"window", "dialog"})
+INPUT_CLASS_FRAGMENTS = (
+    "EditText", "TextField", "SecureTextField", "AutoCompleteTextView", "SearchField", "text_field", "text_area",
+)
 # A field's text (Android) and value (iOS) hold what was typed, not its name.
 FIELD_NAME_ATTRS = ("hint", "content-desc", "label", "name", "placeholderValue")
 SCROLL_CLASS_FRAGMENTS = (
@@ -858,8 +861,8 @@ class UIHelper:
         return " ".join(dict.fromkeys(parts))[:COMPACT_LABEL_MAX_CHARS]
 
     def _folds_text(self, node: etree.Element) -> bool:
-        # A clickable/toggle/input container folds its text; a pure scroll container does not.
-        return self._is_actionable(node) and self._element_actions(node) != ["scroll"]
+        # A clickable/toggle/input container folds its text; a scroll container or a desktop window does not.
+        return node.tag not in DESKTOP_CONTAINER_TAGS and self._is_actionable(node) and self._element_actions(node) != ["scroll"]
 
     def _has_folding_ancestor(self, node: etree.Element) -> bool:
         parent = node.getparent()
@@ -874,6 +877,8 @@ class UIHelper:
         rid = node.attrib.get("resource-id")
         if rid and not _obfuscated_id(rid):
             extra["resource-id"] = rid
+        elif node.attrib.get("id"):
+            extra["id"] = node.attrib["id"]
         if node.attrib.get("password") == "true":
             extra["password"] = True
         if "input" in actions:
