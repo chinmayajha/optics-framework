@@ -198,3 +198,46 @@ def test_an_agent_cannot_start_a_desktop_session_without_an_app(host):
             return "\n".join(c.text for c in result.content if getattr(c, "text", None))
 
     assert "appName" in asyncio.run(start())
+
+
+def _percent_of_window(url, app, xpath):
+    """Where the element is, in percent of the app's window, read through a session of its own."""
+    def call(method, path, body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(f"{url}{path}", data, {"Content-Type": "application/json"}, method=method)
+        with urllib.request.urlopen(request, timeout=60) as response:  # nosec
+            return json.load(response)["value"]
+
+    caps = {"platformName": "Linux", "appium:automationName": "Xa11y", "appium:app": app}
+    session = f"/session/{call('POST', '/session', {'capabilities': {'alwaysMatch': caps}})['sessionId']}"
+    try:
+        windows = call("POST", f"{session}/execute/sync", {"script": "xa11y: listWindows", "args": []})
+        window = next(w for w in windows if w.get("active"))["bounds"]
+        element = call("POST", f"{session}/element", {"using": "xpath", "value": xpath})
+        rect = call("GET", f"{session}/element/{next(iter(element.values()))}/rect")
+    finally:
+        call("DELETE", session)
+    centre_x, centre_y = rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] / 2
+    return round(100 * (centre_x - window["x"]) / window["width"]), round(100 * (centre_y - window["y"]) / window["height"])
+
+
+def test_an_agent_presses_by_percentage_of_the_app_window(host, monkeypatch):
+    fastmcp = pytest.importorskip("fastmcp")
+    monkeypatch.setenv(mcp_server.ENV_ALLOW_COORDINATE_TAPS, "true")
+    percent_x, percent_y = _percent_of_window(host, "gnome-calculator", '//button[@name="7"]')
+
+    async def press():
+        async with fastmcp.Client(mcp_server.build_server()) as client:
+            caps = {"platformName": "Linux", "automationName": "Xa11y"}
+            started = await client.call_tool("start_session", {"driver": "appium", "app": "gnome-calculator", "url": host,
+                                                                "capabilities": caps})
+            sid = started.structured_content["session_id"]
+            try:
+                result = await client.call_tool("run_keyword", {
+                    "session_id": sid, "keyword": "press_by_percentage", "expect_present": ["77"],
+                    "params": {"percent_x": str(percent_x), "percent_y": str(percent_y), "repeat": "2"}})
+                return result.structured_content["verified"]
+            finally:
+                await client.call_tool("terminate_session", {"session_id": sid})
+
+    assert asyncio.run(press()) == "pass", (percent_x, percent_y)

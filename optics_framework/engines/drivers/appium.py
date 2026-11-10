@@ -1179,7 +1179,7 @@ class Appium(DriverInterface):
         swipe_length_percentage: int,
         event_name: Optional[str] = None
     ) -> None:
-        area = self._swipe_area(self._require_driver())
+        area = self.app_area()
         width = area["width"]
         height = area["height"]
         start_x = area["x"] + int(width * x_percentage / 100)
@@ -1407,8 +1407,9 @@ class Appium(DriverInterface):
             raise OpticsError(Code.E0401, message="The app has no window to scroll.")
         return window["bounds"]
 
-    def _swipe_area(self, driver: WebDriver) -> dict:
-        """On a desktop the viewport is the whole screen, so the percentages are of the app's window."""
+    def app_area(self) -> dict:
+        """The rect the user sees the app in: the viewport, or on a desktop (whole screen) the app's window."""
+        driver = self._require_driver()
         if self._is_desktop():
             return self._window_bounds(driver)
         return {"x": 0, "y": 0, **driver.get_window_size()}
@@ -1416,7 +1417,7 @@ class Appium(DriverInterface):
     def _visible_rect(self, element: Any) -> tuple[int, int, int, int]:
         """The part of the element inside its window; a long text view reaches far below the screen."""
         location, size = element.location, element.size
-        window = self._window_bounds(self._require_driver())
+        window = self.app_area()
         return (
             max(location["x"], window["x"]),
             max(location["y"], window["y"]),
@@ -1738,10 +1739,9 @@ class Appium(DriverInterface):
         event_name: Optional[str] = None
     ) -> None:
         percentage_x, percentage_y = int(percentage_x), int(percentage_y)
-        driver = self._require_driver()
-        window_size = driver.get_window_size()
-        x = int(window_size["width"] * percentage_x / 100)
-        y = int(window_size["height"] * percentage_y / 100)
+        area = self.app_area()
+        x = area["x"] + int(area["width"] * percentage_x / 100)
+        y = area["y"] + int(area["height"] * percentage_y / 100)
         for _ in range(repeat):
             internal_logger.debug(
                 f"Pressing at percentage coordinates: ({percentage_x}%, {percentage_y}%)"

@@ -248,16 +248,17 @@ class AppiumFindElement(ElementSourceInterface):
         `.is_displayed()` alone doesn't check this on Appium (confirmed on both Android and
         iOS: an element scrolled well off-screen still reports displayed=True), the same class
         of gap Selenium's `is_displayed()` has -- closed there via a getBoundingClientRect() vs.
-        viewport check. This is the Appium equivalent, using bounds/window-size instead of JS.
+        viewport check. This is the Appium equivalent, using bounds and the app area instead of JS.
         """
         try:
             bbox = self.get_bbox_for_element(located)
             if bbox is None:
                 return False
+            if self.driver is None:
+                return False
             (x1, y1), (x2, y2) = bbox
-            window_size = self._require_driver().get_window_size()
-            win_w, win_h = window_size["width"], window_size["height"]
-            return x1 < win_w and x2 > 0 and y1 < win_h and y2 > 0
+            area = self.driver.app_area()
+            return x1 < area["x"] + area["width"] and x2 > area["x"] and y1 < area["y"] + area["height"] and y2 > area["y"]
         except (OpticsError, WebDriverException):
             return False
 
