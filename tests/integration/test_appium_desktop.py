@@ -76,6 +76,7 @@ def test_types_into_the_editor_and_edits_with_chords(tmp_path, host):
         "Press Keycode,ctrl+a",
         "Enter Text Using Keyboard,<backspace>",
         f"Enter Text,{EDITOR},again",
+        "Press Keycode,ctrl+f",
         f"Enter Text,{EDITOR},<backspace>",
         f"Assert Text,{EDITOR},agai",
     ])

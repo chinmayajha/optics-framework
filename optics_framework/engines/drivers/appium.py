@@ -31,6 +31,7 @@ from selenium.webdriver.common.actions.action_builder import ActionBuilder  # ty
 from selenium.webdriver.common.actions.pointer_input import PointerInput  # type: ignore
 from selenium.webdriver.common.actions import interaction  # type: ignore
 from selenium.webdriver.common.actions.wheel_input import ScrollOrigin  # type: ignore
+from selenium.webdriver.common.keys import Keys  # type: ignore
 from optics_framework.common.driver_interface import DriverInterface
 from optics_framework.common.logging_config import internal_logger, redact_secret_values
 from optics_framework.common import utils
@@ -65,6 +66,15 @@ _SCROLL_WHEEL = {"down": (0, 1), "up": (0, -1), "right": (1, 0), "left": (-1, 0)
 _XA11Y_CHORD = "xa11y: chord"
 _XA11Y_TYPE_TEXT = "xa11y: typeText"
 _XA11Y_LIST_WINDOWS = "xa11y: listWindows"
+_NUM_PAD_KEYS = {
+    **{getattr(SpecialKey, f"NUM_PAD_{n}"): getattr(Keys, f"NUMPAD{n}") for n in range(10)},
+    SpecialKey.NUM_PAD_PLUS: Keys.ADD, SpecialKey.NUM_PAD_MINUS: Keys.SUBTRACT,
+    SpecialKey.NUM_PAD_MULTIPLY: Keys.MULTIPLY, SpecialKey.NUM_PAD_DIVIDE: Keys.DIVIDE,
+    SpecialKey.NUM_PAD_ENTER: Keys.ENTER, SpecialKey.NUM_PAD_DECIMAL: Keys.DECIMAL,
+    SpecialKey.NUM_PAD_COMMA: Keys.SEPARATOR, SpecialKey.NUM_PAD_PERIOD: Keys.DECIMAL,
+    SpecialKey.NUM_PAD_EQUAL: Keys.EQUALS,
+}
+_W3C_KEYS = {key: getattr(Keys, key.name) for key in SpecialKey if hasattr(Keys, key.name)} | _NUM_PAD_KEYS
 _WEB_RECT_JS = "const r = arguments[0].getBoundingClientRect(); return [r.left, r.top, r.width, r.height];"
 # An invisible, untouchable box over the visual viewport: its native rect maps the page's CSS pixels to the screen.
 # It goes inside an open modal, because WebKit hides everything outside one from accessibility.
@@ -1302,7 +1312,7 @@ class Appium(DriverInterface):
     def _press_special_key_in(self, element: Any, key: SpecialKey) -> None:
         keycode = self.KEYCODE_MAP.get(key)
         if self._is_desktop():
-            self._type_desktop(self._require_driver(), key)
+            self._press_desktop_key_in(element, key)
         elif keycode:
             internal_logger.debug(f"Pressing SpecialKey in element: {key}. Keycode: {keycode}")
             self._require_driver().press_keycode(keycode)
@@ -1363,6 +1373,12 @@ class Appium(DriverInterface):
         name = f"optics_{route}"
         driver.command_executor.add_command(name, "POST", f"/session/$sessionId/appium/device/{route}")
         driver.execute(name, {"appId": app_id})
+
+    def _press_desktop_key_in(self, element: Any, key: SpecialKey) -> None:
+        """Send keys focuses the field first; a chord would go to whatever has focus."""
+        if key not in _W3C_KEYS:
+            raise OpticsError(Code.E0105, message=f"A desktop has no '{key.value}' key to press in a field.")
+        self._field_for(element).send_keys(_W3C_KEYS[key])
 
     def _type_desktop(self, driver: WebDriver, text: str | SpecialKey) -> None:
         """Desktop keys are chords named like SpecialKey values; text goes to the control with keyboard focus."""
