@@ -103,3 +103,39 @@ class TestAndroidCompactActions:
         ]
         assert scroll
         assert scroll[0]["act"] == ["scroll"]
+
+
+MAC_TEXTEDIT = (
+    '<application type="AXApplication" name="TextEdit" id="" enabled="true" visible="true">'
+    '<window type="AXWindow" name="Untitled" id="_NS:34" enabled="true" visible="true" clickable="true" '
+    'x="141" y="64" width="586" height="488">'
+    '<text_area type="AXTextArea" name="" value="" label="" id="First Text View" enabled="true" '
+    'visible="true" focused="true" clickable="true" editable="true" scrollable="true" '
+    'x="141" y="164" width="586" height="382"/>'
+    "</window>"
+    "</application>"
+)
+
+MAC_CALCULATOR = (
+    '<application type="AXApplication" name="Calculator" id="" enabled="true" visible="true">'
+    '<window type="AXWindow" name="Calculator" id="main" enabled="true" visible="true" clickable="true" '
+    'x="300" y="400" width="230" height="400">'
+    '<group type="AXScrollArea" name="Edit field" id="StandardInputView" enabled="true" visible="true" '
+    'scrollable="true" x="307" y="535" width="210" height="42">'
+    '<static_text type="AXStaticText" name="12" value="12" id="" enabled="true" visible="true" '
+    'x="485" y="538" width="32" height="36"/>'
+    "</group>"
+    "</window>"
+    "</application>"
+)
+
+
+class TestDesktopCompactActions:
+    def test_text_area_takes_input_and_keeps_its_stable_id(self):
+        entries = _compact(MAC_TEXTEDIT)
+        areas = [entry for entry in entries if entry["extra"].get("id") == "First Text View"]
+        assert areas
+        assert "input" in areas[0]["act"]
+
+    def test_text_inside_a_window_keeps_its_own_row(self):
+        assert _by_label(_compact(MAC_CALCULATOR))["12"]["act"] == []

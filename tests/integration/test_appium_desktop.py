@@ -1,0 +1,132 @@
+"""Drives Mousepad on a Linux Host through Appium and appium-xa11y-driver.
+
+    OPTICS_E2E_XA11Y_URL=http://127.0.0.1:4723 pytest tests/integration/test_appium_desktop.py
+"""
+
+import asyncio
+import json
+import os
+import urllib.request
+
+import pytest
+
+from optics_framework.helper.execute import run_project
+from optics_framework.helper import mcp_server
+
+pytestmark = pytest.mark.black_box
+
+APPIUM_URL = os.environ.get("OPTICS_E2E_XA11Y_URL", "")
+EDITOR = "//text_area"
+
+CONFIG = """\
+driver_sources:
+  - appium:
+      enabled: true
+      url: "{url}"
+      capabilities:
+        platformName: Linux
+        automationName: Xa11y
+        app: mousepad
+elements_sources:
+  - appium_find_element:
+      enabled: true
+  - appium_page_source:
+      enabled: true
+  - appium_screenshot:
+      enabled: true
+"""
+
+
+@pytest.fixture(scope="module")
+def host():
+    if not APPIUM_URL:
+        pytest.skip("Set OPTICS_E2E_XA11Y_URL to an Appium server with appium-xa11y-driver on a Linux Host")
+    try:
+        with urllib.request.urlopen(f"{APPIUM_URL}/status", timeout=3) as response:  # nosec
+            json.load(response)
+    except OSError as e:
+        pytest.skip(f"No Appium server at {APPIUM_URL}: {e}")
+    return APPIUM_URL
+
+
+def _project(tmp_path, url, steps):
+    files = {
+        "config.yaml": CONFIG.format(url=url),
+        "test_cases/test_cases.csv": "test_case,test_step\nEdit,Edit\n",
+        "modules/modules.csv": "\n".join(["module_name,module_step,param_1,param_2,param_3",
+                                          "Edit,Launch App", *(f"Edit,{step}" for step in steps)]) + "\n",
+    }
+    for name, content in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    return str(tmp_path)
+
+
+def _junit(tmp_path):
+    return (tmp_path / "execution_output" / "junit_output.xml").read_text(encoding="utf-8")
+
+
+def test_types_into_the_editor_and_edits_with_chords(tmp_path, host):
+    project = _project(tmp_path, host, [
+        f"Enter Text,{EDITOR},hello",
+        "Enter Text Direct,!",
+        f"Assert Text,{EDITOR},hello!",
+        "Press Keycode,ctrl+a",
+        "Enter Text Using Keyboard,<backspace>",
+        f"Enter Text,{EDITOR},again",
+        f"Enter Text,{EDITOR},<backspace>",
+        f"Assert Text,{EDITOR},agai",
+    ])
+
+    assert run_project(project, use_printer=False) is True, _junit(tmp_path)
+
+
+def test_scrolls_the_window_with_the_wheel(tmp_path, host):
+    project = _project(tmp_path, host, [
+        "Scroll,down",
+        "Scroll,up",
+        f"Assert Presence,{EDITOR},5",
+    ])
+
+    assert run_project(project, use_printer=False) is True, _junit(tmp_path)
+
+
+def test_screen_elements_list_the_editor_as_an_input(tmp_path, host):
+    project = _project(tmp_path, host, ["Get Interactive Elements,compact=true"])
+
+    assert run_project(project, use_printer=False) is True, _junit(tmp_path)
+    elements = json.loads((tmp_path / "execution_output" / "interactable_elements.json").read_text(encoding="utf-8"))
+    assert any("input" in element["act"] for element in elements), elements
+
+
+def test_an_agent_types_presses_chords_and_switches_apps_over_mcp(host):
+    fastmcp = pytest.importorskip("fastmcp")
+
+    async def journey():
+        async with fastmcp.Client(mcp_server.build_server()) as client:
+            async def call(tool, **args):
+                result = await client.call_tool(tool, args, raise_on_error=False)
+                text = "\n".join(c.text for c in result.content if getattr(c, "text", None))
+                assert not result.is_error, text
+                return result.structured_content or {}, text
+
+            caps = {"platformName": "Linux", "automationName": "Xa11y"}
+            started, _ = await call("start_session", driver="appium", app="mousepad", url=host, capabilities=caps)
+            sid = started["session_id"]
+            try:
+                _, screen = await call("observe", session_id=sid)
+                editor = next(line.split()[0] for line in screen.splitlines() if " text_area " in line)
+                typed, _ = await call("type_text", session_id=sid, target=editor, text="from an agent",
+                                      expect_present=["from an agent"])
+                await call("press_key", session_id=sid, key="ctrl+a")
+                cleared, _ = await call("press_key", session_id=sid, key="BackSpace", expect_absent=["from an agent"])
+                await call("scroll", session_id=sid, direction="down")
+                other, _ = await call("launch_app", session_id=sid, app="gnome-calculator",
+                                      expect_present=["Calculate Result"])
+                back, _ = await call("launch_app", session_id=sid, app="mousepad", expect_absent=["Calculate Result"])
+                return [step["verified"] for step in (typed, cleared, other, back)]
+            finally:
+                await call("terminate_session", session_id=sid)
+
+    assert asyncio.run(journey()) == ["pass"] * 4
