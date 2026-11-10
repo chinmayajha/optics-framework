@@ -59,7 +59,8 @@ _MAX_ERROR_OUTPUT_LINES = 20
 _ANDROID_PACKAGE = re.compile(r"[A-Za-z]\w*(?:\.[A-Za-z]\w*)*", re.ASCII)
 
 _CDP_EXECUTE = "opticsExecuteCdp"
-_ACTIVATE_APP = "opticsActivateApp"
+# A swipe drags the content with the finger, so on a desktop the wheel turns the other way from the swipe.
+_SWIPE_WHEEL = {"up": (0, 1), "down": (0, -1), "left": (1, 0), "right": (-1, 0)}
 _WEB_RECT_JS = "const r = arguments[0].getBoundingClientRect(); return [r.left, r.top, r.width, r.height];"
 # An invisible, untouchable box over the visual viewport: its native rect maps the page's CSS pixels to the screen.
 # It goes inside an open modal, because WebKit hides everything outside one from accessibility.
@@ -223,6 +224,10 @@ def _on_tv(method: Callable[..., Any]) -> Callable[..., Any]:
         return method(self, *args, **kwargs) if tv is None else getattr(tv, method.__name__)(*args, **kwargs)
 
     return wrapper
+
+
+def _wheel(driver: WebDriver, x: float, y: float, dx: float, dy: float) -> None:
+    ActionChains(driver).scroll_from_origin(ScrollOrigin.from_viewport(int(x), int(y)), int(dx), int(dy)).perform()
 
 
 class Appium(DriverInterface):
@@ -502,6 +507,7 @@ class Appium(DriverInterface):
             return attached_sid
 
         options, default_options = self._get_platform_and_options(all_caps)
+        self._require_app_at_start(all_caps)
         final_caps = _merge_capabilities(default_options, all_caps)
         internal_logger.debug(f"Final capabilities being applied: {redact_secret_values(final_caps)}")
         for key, value in final_caps.items():
@@ -727,6 +733,18 @@ class Appium(DriverInterface):
             ) from e
 
 
+    def _require_app_at_start(self, all_caps: Dict[str, Any]) -> None:
+        profile = get_profile(all_caps.get(self.CAP_PLATFORM_NAME) or all_caps.get(self.CAP_APPIUM_PLATFORM_NAME))
+        if profile is None or not profile.app_at_start:
+            return
+        if not any(all_caps.get(k) for k in (*profile.app_id_caps, "appName", "appium:appName")):
+            raise OpticsError(
+                Code.E0104,
+                message=f"A {profile.label} session needs its app when it starts: set 'app' to launch it, or 'appName' to "
+                "attach to a running one. With neither, the driver attaches to the frontmost app, which can be the window "
+                "that runs the agent.",
+            )
+
     def _get_platform_and_options(self, all_caps: Dict[str, Any]) -> tuple[Any, Dict[str, Any]]:
         """Helper to determine platform, create options, and set defaults."""
         platform = all_caps.get(self.CAP_PLATFORM_NAME) or all_caps.get(self.CAP_APPIUM_PLATFORM_NAME)
@@ -769,6 +787,8 @@ class Appium(DriverInterface):
             self.event_sdk.capture_event(event_name)
 
         internal_logger.debug(f"Force terminating app: {app_name}")
+        if self._is_desktop():
+            return self._terminate_desktop(app_name)
         try:
             self.driver.terminate_app(app_name)
             internal_logger.info(f"Successfully terminated app: {app_name}")
@@ -1071,7 +1091,13 @@ class Appium(DriverInterface):
         swipe_length: int,
         event_name: Optional[str] = None
     ) -> None:
+        if self._is_desktop():
+            return self._swipe_as_wheel(int(x_coor), int(y_coor), direction, int(swipe_length), event_name)
+        return self._swipe_by_touch(x_coor, y_coor, direction, swipe_length, event_name)
 
+    def _swipe_by_touch(
+        self, x_coor: int, y_coor: int, direction: str, swipe_length: int, event_name: Optional[str]
+    ) -> None:
         driver = self._require_driver()
 
         x_coor = int(x_coor)
@@ -1163,6 +1189,16 @@ class Appium(DriverInterface):
         direction: str,
         swipe_length: int,
         event_name: Optional[str] = None
+    ) -> None:
+        if not self._is_desktop():
+            return self._swipe_element_by_touch(element, direction, swipe_length, event_name)
+        location, size = element.location, element.size
+        centre_x = location["x"] + size["width"] // 2
+        centre_y = location["y"] + size["height"] // 2
+        return self._swipe_as_wheel(centre_x, centre_y, str(direction).lower(), int(swipe_length), event_name)
+
+    def _swipe_element_by_touch(
+        self, element: Any, direction: str, swipe_length: int, event_name: Optional[str]
     ) -> None:
         driver = self._require_driver()
         location = element.location
@@ -1313,9 +1349,20 @@ class Appium(DriverInterface):
         if not self._is_desktop():
             driver.activate_app(app_id)
             return
-        # The client sends activate_app as 'mobile: activateApp', which the Xa11y driver does not serve.
-        driver.command_executor.add_command(_ACTIVATE_APP, "POST", "/session/$sessionId/appium/device/activate_app")
-        driver.execute(_ACTIVATE_APP, {"appId": app_id})
+        self._app_command(driver, "activate_app", app_id)
+
+    def _terminate_desktop(self, app_name: str) -> None:
+        try:
+            self._app_command(self.driver, "terminate_app", app_name)
+        except Exception as e:
+            raise OpticsError(Code.E0401, message=f"Failed to terminate: {app_name}", cause=e) from e
+
+    @staticmethod
+    def _app_command(driver: WebDriver, route: str, app_id: str) -> None:
+        """The client sends app commands as 'mobile:' scripts, which the Xa11y driver does not serve, so use the Appium route."""
+        name = f"optics_{route}"
+        driver.command_executor.add_command(name, "POST", f"/session/$sessionId/appium/device/{route}")
+        driver.execute(name, {"appId": app_id})
 
     def _type_desktop(self, driver: WebDriver, text: str | SpecialKey) -> None:
         """Desktop keys are chords named like SpecialKey values; text goes to the control with keyboard focus."""
@@ -1326,15 +1373,30 @@ class Appium(DriverInterface):
 
     def _wheel_scroll(self, driver: WebDriver, direction: str, event_name: Optional[str]) -> None:
         """Scroll the app's window with the mouse wheel; a touch swipe would select text on a desktop."""
-        windows = driver.execute_script("xa11y: listWindows")
-        bounds = next((w for w in windows if w.get("active")), windows[0])["bounds"]
+        bounds = self._window_bounds(driver)
         dx, dy = {"down": (0, 1), "up": (0, -1), "right": (1, 0), "left": (-1, 0)}[direction]
-        origin = ScrollOrigin.from_viewport(
-            int(bounds["x"] + bounds["width"] / 2), int(bounds["y"] + bounds["height"] / 2)
+        _wheel(
+            driver, bounds["x"] + bounds["width"] / 2, bounds["y"] + bounds["height"] / 2,
+            dx * bounds["width"] * 0.6, dy * bounds["height"] * 0.6,
         )
-        ActionChains(driver).scroll_from_origin(
-            origin, int(dx * bounds["width"] * 0.6), int(dy * bounds["height"] * 0.6)
-        ).perform()
+        if event_name:
+            self.event_sdk.capture_event(event_name)
+
+    @staticmethod
+    def _window_bounds(driver: WebDriver) -> dict:
+        """The bounds of the active window, else of the first window that has bounds."""
+        windows = [w for w in driver.execute_script("xa11y: listWindows") if w.get("bounds")]
+        window = next((w for w in windows if w.get("active")), windows[0] if windows else None)
+        if window is None:
+            raise OpticsError(Code.E0401, message="The app has no window to scroll.")
+        return window["bounds"]
+
+    def _swipe_as_wheel(self, x: int, y: int, direction: str, length: int, event_name: Optional[str]) -> None:
+        if direction not in _SWIPE_WHEEL:
+            internal_logger.error(f"Unknown swipe direction: {direction}")
+            return
+        dx, dy = _SWIPE_WHEEL[direction]
+        _wheel(self._require_driver(), x, y, dx * length, dy * length)
         if event_name:
             self.event_sdk.capture_event(event_name)
 

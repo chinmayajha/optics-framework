@@ -89,6 +89,7 @@ class PlatformProfile:
     web_ui: bool = False  # the session's own context is the app's DOM, with no native tree
     native_screenshot: bool = True
     select_all_chord: str | None = None  # desktop: clear_text selects all with this chord, then deletes
+    app_at_start: bool = False  # the driver attaches when the session starts, so the app (or appName) must be in the capabilities then
 
     def resolve_rc_key(self, keycode: str) -> str:
         key = str(keycode).strip().upper()
@@ -221,7 +222,7 @@ register_profile(PlatformProfile(
 ))
 
 # Desktop apps through appium-xa11y-driver: keys are chords, text goes to the focused control.
-for _name, _label, _select_all in ((MAC, "macOS", "cmd+a"), (WINDOWS, "Windows", "ctrl+a"), (LINUX, "Linux", "ctrl+a")):
+for _name, _label, _select_all in ((MAC, "Mac", "cmd+a"), (WINDOWS, "Windows", "ctrl+a"), (LINUX, "Linux", "ctrl+a")):
     register_profile(PlatformProfile(
         name=_name,
         label=_label,
@@ -230,4 +231,5 @@ for _name, _label, _select_all in ((MAC, "macOS", "cmd+a"), (WINDOWS, "Windows",
         keycode_strategy=KEYCODE_CHORD,
         default_options={"automationName": "Xa11y", "newCommandTimeout": 3600},
         select_all_chord=_select_all,
+        app_at_start=True,
     ))

@@ -686,13 +686,13 @@ def _session_config(
 
 
 def _session_caps(driver: str, app: str, capabilities: dict[str, Any]) -> dict[str, Any]:
-    """A desktop session attaches to an app when it starts, so its app goes in the capabilities."""
-    if driver != "appium" or not app:
+    """A platform that attaches when the session starts takes the app in the capabilities, unless they name one to attach to."""
+    if driver != "appium" or not app or capabilities.get("appName") or capabilities.get("appium:appName"):
         return capabilities
-    from optics_framework.engines.drivers.appium_platforms import DESKTOP, normalize_platform
+    from optics_framework.engines.drivers.appium_platforms import get_profile
 
-    platform = capabilities.get("platformName") or capabilities.get("appium:platformName")
-    return {"app": app} | capabilities if normalize_platform(platform) in DESKTOP else capabilities
+    profile = get_profile(capabilities.get("platformName") or capabilities.get("appium:platformName"))
+    return {"app": app} | capabilities if profile is not None and profile.app_at_start else capabilities
 
 
 async def _start(driver: str, app: str, config: expose_api.SessionConfig) -> Any:
