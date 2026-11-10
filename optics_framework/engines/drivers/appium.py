@@ -1166,12 +1166,11 @@ class Appium(DriverInterface):
         swipe_length_percentage: int,
         event_name: Optional[str] = None
     ) -> None:
-        driver = self._require_driver()
-        window_size = driver.get_window_size()
-        width = window_size["width"]
-        height = window_size["height"]
-        start_x = int(width * x_percentage / 100)
-        start_y = int(height * y_percentage / 100)
+        area = self._swipe_area(self._require_driver())
+        width = area["width"]
+        height = area["height"]
+        start_x = area["x"] + int(width * x_percentage / 100)
+        start_y = area["y"] + int(height * y_percentage / 100)
         swipe_length: int
         if direction in ("up", "down"):
             swipe_length = int(height * swipe_length_percentage / 100)
@@ -1192,10 +1191,8 @@ class Appium(DriverInterface):
     ) -> None:
         if not self._is_desktop():
             return self._swipe_element_by_touch(element, direction, swipe_length, event_name)
-        location, size = element.location, element.size
-        centre_x = location["x"] + size["width"] // 2
-        centre_y = location["y"] + size["height"] // 2
-        return self._swipe_as_wheel(centre_x, centre_y, str(direction).lower(), int(swipe_length), event_name)
+        left, top, right, bottom = self._visible_rect(element)
+        return self._swipe_as_wheel((left + right) // 2, (top + bottom) // 2, str(direction).lower(), int(swipe_length), event_name)
 
     def _swipe_element_by_touch(
         self, element: Any, direction: str, swipe_length: int, event_name: Optional[str]
@@ -1390,6 +1387,23 @@ class Appium(DriverInterface):
         if window is None:
             raise OpticsError(Code.E0401, message="The app has no window to scroll.")
         return window["bounds"]
+
+    def _swipe_area(self, driver: WebDriver) -> dict:
+        """On a desktop the viewport is the whole screen, so the percentages are of the app's window."""
+        if self._is_desktop():
+            return self._window_bounds(driver)
+        return {"x": 0, "y": 0, **driver.get_window_size()}
+
+    def _visible_rect(self, element: Any) -> tuple[int, int, int, int]:
+        """The part of the element inside its window; a long text view reaches far below the screen."""
+        location, size = element.location, element.size
+        window = self._window_bounds(self._require_driver())
+        return (
+            max(location["x"], window["x"]),
+            max(location["y"], window["y"]),
+            min(location["x"] + size["width"], window["x"] + window["width"]),
+            min(location["y"] + size["height"], window["y"] + window["height"]),
+        )
 
     def _swipe_as_wheel(self, x: int, y: int, direction: str, length: int, event_name: Optional[str]) -> None:
         if direction not in _SWIPE_WHEEL:

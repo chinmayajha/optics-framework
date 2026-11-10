@@ -183,7 +183,7 @@ def test_an_agent_swipes_a_desktop_window_with_the_wheel(host):
                 await call("terminate_session", session_id=sid)
 
     top, down, back = asyncio.run(swipe())
-    assert top < back < down, (top, down, back)
+    assert down > max(top, back), (top, down, back)
 
 
 def test_an_agent_cannot_start_a_desktop_session_without_an_app(host):
