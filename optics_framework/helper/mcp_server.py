@@ -870,7 +870,7 @@ def build_server(toolset: str | None = None) -> "FastMCP":
         return await _act(action, screen, session_id)
 
     async def press_key(
-        key: Annotated[str, Field(description="back, a key name such as Enter or Escape, or an Android KeyEvent number.")],
+        key: Annotated[str, Field(description="back, a key name such as Enter or Escape, a desktop chord such as cmd+s, or an Android KeyEvent number.")],
         expect_present: _PRESENT = [], expect_absent: _ABSENT = [], screen: _SCREEN = "diff",  # noqa: B006
         session_id: _SID = "",
     ) -> Any:
