@@ -61,6 +61,10 @@ _ANDROID_PACKAGE = re.compile(r"[A-Za-z]\w*(?:\.[A-Za-z]\w*)*", re.ASCII)
 _CDP_EXECUTE = "opticsExecuteCdp"
 # A swipe drags the content with the finger, so on a desktop the wheel turns the other way from the swipe.
 _SWIPE_WHEEL = {"up": (0, 1), "down": (0, -1), "left": (1, 0), "right": (-1, 0)}
+_SCROLL_WHEEL = {"down": (0, 1), "up": (0, -1), "right": (1, 0), "left": (-1, 0)}
+_XA11Y_CHORD = "xa11y: chord"
+_XA11Y_TYPE_TEXT = "xa11y: typeText"
+_XA11Y_LIST_WINDOWS = "xa11y: listWindows"
 _WEB_RECT_JS = "const r = arguments[0].getBoundingClientRect(); return [r.left, r.top, r.width, r.height];"
 # An invisible, untouchable box over the visual viewport: its native rect maps the page's CSS pixels to the screen.
 # It goes inside an open modal, because WebKit hides everything outside one from accessibility.
@@ -732,7 +736,6 @@ class Appium(DriverInterface):
                 cause=e,
             ) from e
 
-
     def _require_app_at_start(self, all_caps: Dict[str, Any]) -> None:
         profile = get_profile(all_caps.get(self.CAP_PLATFORM_NAME) or all_caps.get(self.CAP_APPIUM_PLATFORM_NAME))
         if profile is None or not profile.app_at_start:
@@ -1364,14 +1367,14 @@ class Appium(DriverInterface):
     def _type_desktop(self, driver: WebDriver, text: str | SpecialKey) -> None:
         """Desktop keys are chords named like SpecialKey values; text goes to the control with keyboard focus."""
         if isinstance(text, SpecialKey):
-            driver.execute_script("xa11y: chord", {"keys": text.value})
+            driver.execute_script(_XA11Y_CHORD, {"keys": text.value})
         else:
-            driver.execute_script("xa11y: typeText", {"text": utils.strip_sensitive_prefix(str(text))})
+            driver.execute_script(_XA11Y_TYPE_TEXT, {"text": utils.strip_sensitive_prefix(str(text))})
 
     def _wheel_scroll(self, driver: WebDriver, direction: str, event_name: Optional[str]) -> None:
         """Scroll the app's window with the mouse wheel; a touch swipe would select text on a desktop."""
         bounds = self._window_bounds(driver)
-        dx, dy = {"down": (0, 1), "up": (0, -1), "right": (1, 0), "left": (-1, 0)}[direction]
+        dx, dy = _SCROLL_WHEEL[direction]
         _wheel(
             driver, bounds["x"] + bounds["width"] / 2, bounds["y"] + bounds["height"] / 2,
             dx * bounds["width"] * 0.6, dy * bounds["height"] * 0.6,
@@ -1382,7 +1385,7 @@ class Appium(DriverInterface):
     @staticmethod
     def _window_bounds(driver: WebDriver) -> dict:
         """The bounds of the active window, else of the first window that has bounds."""
-        windows = [w for w in driver.execute_script("xa11y: listWindows") if w.get("bounds")]
+        windows = [w for w in driver.execute_script(_XA11Y_LIST_WINDOWS) if w.get("bounds")]
         window = next((w for w in windows if w.get("active")), windows[0] if windows else None)
         if window is None:
             raise OpticsError(Code.E0401, message="The app has no window to scroll.")
@@ -1491,8 +1494,8 @@ class Appium(DriverInterface):
         internal_logger.debug("Clearing text input")
         select_all = self._require_profile().select_all_chord
         if select_all:
-            driver.execute_script("xa11y: chord", {"keys": select_all})
-            driver.execute_script("xa11y: chord", {"keys": "backspace"})
+            driver.execute_script(_XA11Y_CHORD, {"keys": select_all})
+            driver.execute_script(_XA11Y_CHORD, {"keys": "backspace"})
             return
         driver.execute_script(self.MOBILE_CLEAR)
 
@@ -1508,7 +1511,7 @@ class Appium(DriverInterface):
             internal_logger.debug(f"{profile.rc_command} -> {payload}")
             driver.execute_script(profile.rc_command, payload)
         elif profile.keycode_strategy == KEYCODE_CHORD:
-            driver.execute_script("xa11y: chord", {"keys": utils.strip_sensitive_prefix(str(keycode))})
+            driver.execute_script(_XA11Y_CHORD, {"keys": utils.strip_sensitive_prefix(str(keycode))})
         else:
             driver.press_keycode(int(utils.strip_sensitive_prefix(keycode)))
 
