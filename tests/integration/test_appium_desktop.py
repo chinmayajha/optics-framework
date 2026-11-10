@@ -200,6 +200,27 @@ def test_an_agent_cannot_start_a_desktop_session_without_an_app(host):
     assert "appName" in asyncio.run(start())
 
 
+def test_an_agent_starts_a_desktop_app_named_in_appium_options(host):
+    fastmcp = pytest.importorskip("fastmcp")
+
+    async def start():
+        async with fastmcp.Client(mcp_server.build_server()) as client:
+            caps = {"platformName": "Linux", "automationName": "Xa11y", "appium:options": {"app": "mousepad"}}
+            result = await client.call_tool("start_session", {"driver": "appium", "url": host, "capabilities": caps},
+                                            raise_on_error=False)
+            if result.is_error:
+                return "\n".join(c.text for c in result.content if getattr(c, "text", None))
+            sid = result.structured_content["session_id"]
+            try:
+                screen = await client.call_tool("observe", {"session_id": sid})
+                return "\n".join(c.text for c in screen.content if getattr(c, "text", None))
+            finally:
+                await client.call_tool("terminate_session", {"session_id": sid})
+
+    screen = asyncio.run(start())
+    assert " text_area " in screen, screen
+
+
 def _percent_of_window(url, app, xpath):
     """Where the element is, in percent of the app's window, read through a session of its own."""
     def call(method, path, body=None):

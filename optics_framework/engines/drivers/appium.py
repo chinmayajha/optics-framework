@@ -44,6 +44,7 @@ from optics_framework.engines.drivers.appium_platforms import (
     PlatformProfile,
     get_profile,
     normalize_platform,
+    promote_appium_options,
     supported_platforms,
     supported_on,
     ANDROID,
@@ -326,7 +327,7 @@ class Appium(DriverInterface):
 
         self.appium_server_url: str = str(config.get(self.CONFIG_URL, self.DEFAULT_APPIUM_URL))
 
-        self.capabilities: Dict[str, Any] = config.get(self.CONFIG_CAPABILITIES, {})
+        self.capabilities: Dict[str, Any] = promote_appium_options(config.get(self.CONFIG_CAPABILITIES, {}))
         if not self.capabilities:
             internal_logger.debug("No capabilities found in config")
             raise OpticsError(Code.E0104, message="Appium capabilities not found in config")

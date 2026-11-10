@@ -121,6 +121,15 @@ def get_profile(platform_name: Any) -> PlatformProfile | None:
     return PROFILES.get(normalize_platform(platform_name))
 
 
+def promote_appium_options(caps: dict[str, Any]) -> dict[str, Any]:
+    """The capabilities as the Appium server reads them: each key in appium:options moves up with the appium: prefix."""
+    options = caps.get("appium:options")
+    if not isinstance(options, dict):
+        return caps
+    rest = {k: v for k, v in caps.items() if k != "appium:options"}
+    return rest | {k if k.startswith("appium:") else f"appium:{k}": v for k, v in options.items()}
+
+
 def supported_platforms() -> str:
     return ", ".join(p.label for p in PROFILES.values())
 

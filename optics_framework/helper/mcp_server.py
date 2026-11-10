@@ -687,9 +687,13 @@ def _session_config(
 
 def _session_caps(driver: str, app: str, capabilities: dict[str, Any]) -> dict[str, Any]:
     """A platform that attaches when the session starts takes the app in the capabilities, unless they name one to attach to."""
-    if driver != "appium" or not app or capabilities.get("appName") or capabilities.get("appium:appName"):
+    if driver != "appium":
         return capabilities
-    from optics_framework.engines.drivers.appium_platforms import get_profile
+    from optics_framework.engines.drivers.appium_platforms import get_profile, promote_appium_options
+
+    capabilities = promote_appium_options(capabilities)
+    if not app or capabilities.get("appName") or capabilities.get("appium:appName"):
+        return capabilities
 
     profile = get_profile(capabilities.get("platformName") or capabilities.get("appium:platformName"))
     return {"app": app} | capabilities if profile is not None and profile.app_at_start else capabilities
