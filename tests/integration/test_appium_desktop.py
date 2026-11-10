@@ -84,16 +84,6 @@ def test_types_into_the_editor_and_edits_with_chords(tmp_path, host):
     assert run_project(project, use_printer=False) is True, _junit(tmp_path)
 
 
-def test_scrolls_the_window_with_the_wheel(tmp_path, host):
-    project = _project(tmp_path, host, [
-        "Scroll,down",
-        "Scroll,up",
-        f"Assert Presence,{EDITOR},5",
-    ])
-
-    assert run_project(project, use_printer=False) is True, _junit(tmp_path)
-
-
 def _attach(url, app_name):
     caps = {"platformName": "Linux", "appium:automationName": "Xa11y", "appium:appName": app_name, "appium:launchTimeout": 500}
     body = json.dumps({"capabilities": {"alwaysMatch": caps}}).encode()
@@ -150,10 +140,11 @@ def test_an_agent_types_presses_chords_and_switches_apps_over_mcp(host):
     assert asyncio.run(journey()) == ["pass"] * 4
 
 
-def test_an_agent_swipes_a_desktop_window_with_the_wheel(host):
+def _scroll_positions(host, steps):
+    """The editor's vertical scroll position at the top of 120 lines, then after each run_keyword step."""
     fastmcp = pytest.importorskip("fastmcp")
 
-    async def swipe():
+    async def run():
         async with fastmcp.Client(mcp_server.build_server()) as client:
             async def call(tool, **args):
                 result = await client.call_tool(tool, args, raise_on_error=False)
@@ -161,7 +152,8 @@ def test_an_agent_swipes_a_desktop_window_with_the_wheel(host):
                 assert not result.is_error, text
                 return text
 
-            def scrolled(screen):
+            async def position():
+                screen = await call("observe", session_id=sid)
                 return float(next(line for line in screen.splitlines() if " scroll_bar " in line).split('"')[1])
 
             caps = {"platformName": "Linux", "automationName": "Xa11y"}
@@ -173,18 +165,30 @@ def test_an_agent_swipes_a_desktop_window_with_the_wheel(host):
                 editor = next(line.split()[0] for line in screen.splitlines() if " text_area " in line)
                 await call("type_text", session_id=sid, target=editor, text="\n".join(f"line {i}" for i in range(120)))
                 await call("press_key", session_id=sid, key="ctrl+Home")
-                top = scrolled(await call("observe", session_id=sid))
-                await call("run_keyword", session_id=sid, keyword="swipe_by_percentage",
-                           params={"percent_x": "50", "percent_y": "50", "direction": "up", "swipe_length": "30"})
-                down = scrolled(await call("observe", session_id=sid))
-                await call("run_keyword", session_id=sid, keyword="swipe_from_element",
-                           params={"element": "//text_area", "direction": "down", "swipe_length": "200"})
-                return top, down, scrolled(await call("observe", session_id=sid))
+                positions = [await position()]
+                for keyword, params in steps:
+                    await call("run_keyword", session_id=sid, keyword=keyword, params=params)
+                    positions.append(await position())
+                return positions
             finally:
                 await call("terminate_session", session_id=sid)
 
-    top, down, back = asyncio.run(swipe())
-    assert down > max(top, back), (top, down, back)
+    return asyncio.run(run())
+
+
+def test_scrolls_the_window_with_the_wheel(host):
+    top, down, back = _scroll_positions(host, [("scroll", {"direction": "down"}), ("scroll", {"direction": "up"})])
+
+    assert top < down and back < down, (top, down, back)
+
+
+def test_an_agent_swipes_a_desktop_window_with_the_wheel(host):
+    top, down, back = _scroll_positions(host, [
+        ("swipe_by_percentage", {"percent_x": "50", "percent_y": "50", "direction": "up", "swipe_length": "30"}),
+        ("swipe_from_element", {"element": "//text_area", "direction": "down", "swipe_length": "200"}),
+    ])
+
+    assert top < down and back < down, (top, down, back)
 
 
 def test_an_agent_cannot_start_a_desktop_session_without_an_app(host):
