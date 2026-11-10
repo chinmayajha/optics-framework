@@ -685,6 +685,16 @@ def _session_config(
     )
 
 
+def _session_caps(driver: str, app: str, capabilities: dict[str, Any]) -> dict[str, Any]:
+    """A desktop session attaches to an app when it starts, so its app goes in the capabilities."""
+    if driver != "appium" or not app:
+        return capabilities
+    from optics_framework.engines.drivers.appium_platforms import DESKTOP, normalize_platform
+
+    platform = capabilities.get("platformName") or capabilities.get("appium:platformName")
+    return {"app": app} | capabilities if normalize_platform(platform) in DESKTOP else capabilities
+
+
 async def _start(driver: str, app: str, config: expose_api.SessionConfig) -> Any:
     """Create the session, then open ``app`` when one is given."""
     try:
@@ -813,7 +823,7 @@ def build_server(toolset: str | None = None) -> "FastMCP":
         strict_element_match: Annotated[bool, Field(description="No fuzzy text matches.")] = False,
     ) -> Any:
         config = _session_config(
-            driver, url, capabilities, elements_sources, text_detection=list(text_detection),
+            driver, url, _session_caps(driver, app, capabilities), elements_sources, text_detection=list(text_detection),
             image_detection=list(image_detection), project_path=project_path or None, ai_self_heal=ai_self_heal,
             llm_provider=llm_provider or None, llm_model=llm_model or None, strict_element_match=strict_element_match,
         )

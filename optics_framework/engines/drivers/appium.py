@@ -59,6 +59,7 @@ _MAX_ERROR_OUTPUT_LINES = 20
 _ANDROID_PACKAGE = re.compile(r"[A-Za-z]\w*(?:\.[A-Za-z]\w*)*", re.ASCII)
 
 _CDP_EXECUTE = "opticsExecuteCdp"
+_ACTIVATE_APP = "opticsActivateApp"
 _WEB_RECT_JS = "const r = arguments[0].getBoundingClientRect(); return [r.left, r.top, r.width, r.height];"
 # An invisible, untouchable box over the visual viewport: its native rect maps the page's CSS pixels to the screen.
 # It goes inside an open modal, because WebKit hides everything outside one from accessibility.
@@ -979,7 +980,7 @@ class Appium(DriverInterface):
             )
         elif app_identifier:
             try:
-                self._require_driver().activate_app(app_identifier)
+                self._activate_app(self._require_driver(), app_identifier)
             except Exception as exc:
                 raise OpticsError(
                     Code.E0401, message=f"Failed to launch: {app_identifier}", cause=exc
@@ -1013,7 +1014,7 @@ class Appium(DriverInterface):
                 self._open_deeplink(driver, app_name)
                 return
 
-            driver.activate_app(app_name)
+            self._activate_app(driver, app_name)
             internal_logger.debug(f"Activated app: {app_name}")
 
         except OpticsError:
@@ -1307,6 +1308,14 @@ class Appium(DriverInterface):
 
     def _is_desktop(self) -> bool:
         return self._active_platform() in DESKTOP
+
+    def _activate_app(self, driver: WebDriver, app_id: str) -> None:
+        if not self._is_desktop():
+            driver.activate_app(app_id)
+            return
+        # The client sends activate_app as 'mobile: activateApp', which the Xa11y driver does not serve.
+        driver.command_executor.add_command(_ACTIVATE_APP, "POST", "/session/$sessionId/appium/device/activate_app")
+        driver.execute(_ACTIVATE_APP, {"appId": app_id})
 
     def _type_desktop(self, driver: WebDriver, text: str | SpecialKey) -> None:
         """Desktop keys are chords named like SpecialKey values; text goes to the control with keyboard focus."""
