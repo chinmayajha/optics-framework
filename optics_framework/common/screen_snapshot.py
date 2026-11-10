@@ -423,22 +423,36 @@ def _verified(ok: bool, kept: tuple[Check, ...], d: Diff, vision: bool) -> Verif
 
 
 def _locator_rungs(row: Row, snap: Snapshot) -> list[str]:
-    # A loc that finds an input by its typed value will not match on a replay.
-    value_loc = (
-        "input" in row.act and row.name != row.label
-        and bool(_VALUE_ATTR_RE.search(_unquoted(row.loc))) and _names_by_text(row.loc, row.label)
-    )
-    rungs = [row.loc] if row.loc and not value_loc else []
-    # A native loc that is not unique by name means the rid is on other nodes too.
-    rid_shared = bool(row.loc) and not row.web and not _names_one_element(row.loc)
-    if row.rid and not rid_shared and sum(r.rid == row.rid for r in snap.all_rows) == 1:
-        if row.web:
-            rung = f"css=#{row.rid}" if _CSS_ID_RE.match(row.rid) else f'css=[id="{row.rid}"]'
-        else:
-            rung = f'//*[@{row.rid_attr}="{row.rid}"]'
+    rungs = [row.loc] if row.loc and not _finds_by_typed_value(row) else []
+    if _rid_is_unique(row, snap):
+        rung = _rid_rung(row)
         if rung not in rungs and rung.removeprefix("css=") not in rungs:
             rungs.append(rung)
     return rungs
+
+
+def _finds_by_typed_value(row: Row) -> bool:
+    """A loc that finds an input by its typed value will not match on a replay."""
+    return (
+        "input" in row.act and row.name != row.label
+        and bool(_VALUE_ATTR_RE.search(_unquoted(row.loc))) and _names_by_text(row.loc, row.label)
+    )
+
+
+def _rid_is_unique(row: Row, snap: Snapshot) -> bool:
+    """A native loc that is not unique by name means the rid is on other nodes too."""
+    rid_shared = bool(row.loc) and not row.web and not _names_one_element(row.loc)
+    return bool(row.rid) and not rid_shared and sum(r.rid == row.rid for r in snap.all_rows) == 1
+
+
+def _rid_rung(row: Row) -> str:
+    """The locator of the row's id, with the id quoted for the CSS or XPath engine."""
+    if not row.web:
+        return f"//*[@{row.rid_attr}={utils.xpath_literal(row.rid)}]"
+    if _CSS_ID_RE.match(row.rid):
+        return f"css=#{row.rid}"
+    quoted = row.rid.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\a ")
+    return f'css=[id="{quoted}"]'
 
 
 def _holds_secret(row: Row) -> bool:
