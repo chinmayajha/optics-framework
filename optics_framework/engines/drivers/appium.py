@@ -30,6 +30,8 @@ from selenium.webdriver.common.action_chains import ActionChains  # type: ignore
 from selenium.webdriver.common.actions.action_builder import ActionBuilder  # type: ignore
 from selenium.webdriver.common.actions.pointer_input import PointerInput  # type: ignore
 from selenium.webdriver.common.actions import interaction  # type: ignore
+from selenium.webdriver.common.actions.wheel_input import ScrollOrigin  # type: ignore
+from selenium.webdriver.common.keys import Keys  # type: ignore
 from optics_framework.common.driver_interface import DriverInterface
 from optics_framework.common.logging_config import internal_logger, redact_secret_values
 from optics_framework.common import utils
@@ -42,10 +44,14 @@ from optics_framework.engines.drivers.appium_platforms import (
     PlatformProfile,
     get_profile,
     normalize_platform,
+    promote_appium_options,
     supported_platforms,
     supported_on,
     ANDROID,
+    DESKTOP,
     MOBILE,
+    POINTER,
+    KEYCODE_CHORD,
     KEYCODE_RC_NAMED,
 )
 from optics_framework.common.error import OpticsError, Code
@@ -55,6 +61,21 @@ _MAX_ERROR_OUTPUT_LINES = 20
 _ANDROID_PACKAGE = re.compile(r"[A-Za-z]\w*(?:\.[A-Za-z]\w*)*", re.ASCII)
 
 _CDP_EXECUTE = "opticsExecuteCdp"
+# A swipe drags the content with the finger, so on a desktop the wheel turns the other way from the swipe.
+_SWIPE_WHEEL = {"up": (0, 1), "down": (0, -1), "left": (1, 0), "right": (-1, 0)}
+_SCROLL_WHEEL = {"down": (0, 1), "up": (0, -1), "right": (1, 0), "left": (-1, 0)}
+_XA11Y_CHORD = "xa11y: chord"
+_XA11Y_TYPE_TEXT = "xa11y: typeText"
+_XA11Y_LIST_WINDOWS = "xa11y: listWindows"
+_NUM_PAD_KEYS = {
+    **{getattr(SpecialKey, f"NUM_PAD_{n}"): getattr(Keys, f"NUMPAD{n}") for n in range(10)},
+    SpecialKey.NUM_PAD_PLUS: Keys.ADD, SpecialKey.NUM_PAD_MINUS: Keys.SUBTRACT,
+    SpecialKey.NUM_PAD_MULTIPLY: Keys.MULTIPLY, SpecialKey.NUM_PAD_DIVIDE: Keys.DIVIDE,
+    SpecialKey.NUM_PAD_ENTER: Keys.ENTER, SpecialKey.NUM_PAD_DECIMAL: Keys.DECIMAL,
+    SpecialKey.NUM_PAD_COMMA: Keys.SEPARATOR, SpecialKey.NUM_PAD_PERIOD: Keys.DECIMAL,
+    SpecialKey.NUM_PAD_EQUAL: Keys.EQUALS,
+}
+_W3C_KEYS = {key: getattr(Keys, key.name) for key in SpecialKey if hasattr(Keys, key.name)} | _NUM_PAD_KEYS
 _WEB_RECT_JS = "const r = arguments[0].getBoundingClientRect(); return [r.left, r.top, r.width, r.height];"
 # An invisible, untouchable box over the visual viewport: its native rect maps the page's CSS pixels to the screen.
 # It goes inside an open modal, because WebKit hides everything outside one from accessibility.
@@ -220,6 +241,26 @@ def _on_tv(method: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
+def _wheel(driver: WebDriver, x: float, y: float, dx: float, dy: float) -> None:
+    ActionChains(driver).scroll_from_origin(ScrollOrigin.from_viewport(int(x), int(y)), int(dx), int(dy)).perform()
+
+
+def _part_inside(rect: dict, area: dict) -> dict | None:
+    if not (rect["x"] < area["x"] + area["width"] and rect["x"] + rect["width"] > area["x"]
+            and rect["y"] < area["y"] + area["height"] and rect["y"] + rect["height"] > area["y"]):
+        return None
+    left, top = max(rect["x"], area["x"]), max(rect["y"], area["y"])
+    right = min(rect["x"] + rect["width"], area["x"] + area["width"])
+    bottom = min(rect["y"] + rect["height"], area["y"] + area["height"])
+    return {"x": left, "y": top, "width": right - left, "height": bottom - top}
+
+
+def largest_part(rect: dict, areas: list[dict]) -> dict | None:
+    """The part of the rect inside the area that holds most of it, the first such area on a tie; None if no area holds any."""
+    parts = [part for area in areas if (part := _part_inside(rect, area)) is not None]
+    return max(parts, key=lambda part: part["width"] * part["height"], default=None)
+
+
 class Appium(DriverInterface):
     DEPENDENCY_TYPE = "driver_sources"
     NAME = "appium"
@@ -302,7 +343,7 @@ class Appium(DriverInterface):
 
         self.appium_server_url: str = str(config.get(self.CONFIG_URL, self.DEFAULT_APPIUM_URL))
 
-        self.capabilities: Dict[str, Any] = config.get(self.CONFIG_CAPABILITIES, {})
+        self.capabilities: Dict[str, Any] = promote_appium_options(config.get(self.CONFIG_CAPABILITIES, {}))
         if not self.capabilities:
             internal_logger.debug("No capabilities found in config")
             raise OpticsError(Code.E0104, message="Appium capabilities not found in config")
@@ -497,6 +538,7 @@ class Appium(DriverInterface):
             return attached_sid
 
         options, default_options = self._get_platform_and_options(all_caps)
+        self._require_app_at_start(all_caps)
         final_caps = _merge_capabilities(default_options, all_caps)
         internal_logger.debug(f"Final capabilities being applied: {redact_secret_values(final_caps)}")
         for key, value in final_caps.items():
@@ -721,6 +763,17 @@ class Appium(DriverInterface):
                 cause=e,
             ) from e
 
+    def _require_app_at_start(self, all_caps: Dict[str, Any]) -> None:
+        profile = get_profile(all_caps.get(self.CAP_PLATFORM_NAME) or all_caps.get(self.CAP_APPIUM_PLATFORM_NAME))
+        if profile is None or not profile.app_at_start:
+            return
+        if not any(all_caps.get(k) for k in (*profile.app_id_caps, "appName", "appium:appName")):
+            raise OpticsError(
+                Code.E0104,
+                message=f"A {profile.label} session needs its app when it starts: set 'app' to launch it, or 'appName' to "
+                "attach to a running one. With neither, the driver attaches to the frontmost app, which can be the window "
+                "that runs the agent.",
+            )
 
     def _get_platform_and_options(self, all_caps: Dict[str, Any]) -> tuple[Any, Dict[str, Any]]:
         """Helper to determine platform, create options, and set defaults."""
@@ -764,6 +817,8 @@ class Appium(DriverInterface):
             self.event_sdk.capture_event(event_name)
 
         internal_logger.debug(f"Force terminating app: {app_name}")
+        if self._is_desktop():
+            return self._terminate_desktop(app_name)
         try:
             self.driver.terminate_app(app_name)
             internal_logger.info(f"Successfully terminated app: {app_name}")
@@ -975,7 +1030,7 @@ class Appium(DriverInterface):
             )
         elif app_identifier:
             try:
-                self._require_driver().activate_app(app_identifier)
+                self._activate_app(self._require_driver(), app_identifier)
             except Exception as exc:
                 raise OpticsError(
                     Code.E0401, message=f"Failed to launch: {app_identifier}", cause=exc
@@ -1009,7 +1064,7 @@ class Appium(DriverInterface):
                 self._open_deeplink(driver, app_name)
                 return
 
-            driver.activate_app(app_name)
+            self._activate_app(driver, app_name)
             internal_logger.debug(f"Activated app: {app_name}")
 
         except OpticsError:
@@ -1028,7 +1083,7 @@ class Appium(DriverInterface):
         return self.driver
 
     # APPIUM api wrappers
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def click_element(self, element: Any, event_name: Optional[str] = None) -> None:
         """
         Click on the specified element using Appium's click method.
@@ -1042,7 +1097,7 @@ class Appium(DriverInterface):
         except Exception as e:
             internal_logger.debug(e)
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def tap_at_coordinates(self, x: int, y: int, event_name: Optional[str] = None) -> None:
         """
         Simulates a tap gesture at the specified screen coordinates using Appium's `tap` method.
@@ -1057,7 +1112,7 @@ class Appium(DriverInterface):
             self.event_sdk.capture_event_with_time_input(event_name, timestamp)
         internal_logger.debug(f"Tapped at coordinates ({x}, {y})")
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def swipe(
         self,
         x_coor: int,
@@ -1066,7 +1121,13 @@ class Appium(DriverInterface):
         swipe_length: int,
         event_name: Optional[str] = None
     ) -> None:
+        if self._is_desktop():
+            return self._swipe_as_wheel(int(x_coor), int(y_coor), direction, int(swipe_length), event_name)
+        return self._swipe_by_touch(x_coor, y_coor, direction, swipe_length, event_name)
 
+    def _swipe_by_touch(
+        self, x_coor: int, y_coor: int, direction: str, swipe_length: int, event_name: Optional[str]
+    ) -> None:
         driver = self._require_driver()
 
         x_coor = int(x_coor)
@@ -1126,7 +1187,7 @@ class Appium(DriverInterface):
             )
 
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def swipe_percentage(
         self,
         x_percentage: int,
@@ -1135,12 +1196,11 @@ class Appium(DriverInterface):
         swipe_length_percentage: int,
         event_name: Optional[str] = None
     ) -> None:
-        driver = self._require_driver()
-        window_size = driver.get_window_size()
-        width = window_size["width"]
-        height = window_size["height"]
-        start_x = int(width * x_percentage / 100)
-        start_y = int(height * y_percentage / 100)
+        area = self.app_area()
+        width = area["width"]
+        height = area["height"]
+        start_x = area["x"] + int(width * x_percentage / 100)
+        start_y = area["y"] + int(height * y_percentage / 100)
         swipe_length: int
         if direction in ("up", "down"):
             swipe_length = int(height * swipe_length_percentage / 100)
@@ -1151,13 +1211,22 @@ class Appium(DriverInterface):
             return
         self.swipe(start_x, start_y, direction, swipe_length, event_name=event_name)
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def swipe_element(
         self,
         element: Any,
         direction: str,
         swipe_length: int,
         event_name: Optional[str] = None
+    ) -> None:
+        if not self._is_desktop():
+            return self._swipe_element_by_touch(element, direction, swipe_length, event_name)
+        part = self._visible_part(element)
+        x, y = part["x"] + part["width"] // 2, part["y"] + part["height"] // 2
+        return self._swipe_as_wheel(x, y, str(direction).lower(), int(swipe_length), event_name)
+
+    def _swipe_element_by_touch(
+        self, element: Any, direction: str, swipe_length: int, event_name: Optional[str]
     ) -> None:
         driver = self._require_driver()
         location = element.location
@@ -1209,7 +1278,7 @@ class Appium(DriverInterface):
                 f"Failed to perform TouchAction swipe from ({start_x}, {start_y}) to ({end_x}, {end_y}): {e}"
             )
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def scroll(
         self,
         direction: str,
@@ -1226,6 +1295,8 @@ class Appium(DriverInterface):
         if fractions is None:
             internal_logger.error(f"Scroll direction '{direction}' not supported.")
             return
+        if self._is_desktop():
+            return self._wheel_scroll(driver, direction, event_name)
         window_size = driver.get_window_size()
         width = window_size["width"]
         height = window_size["height"]
@@ -1245,30 +1316,31 @@ class Appium(DriverInterface):
             internal_logger.debug(f"Failed to scroll {direction}: {e}")
 
     @_on_tv
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def enter_text_element(self, element: Any, text: Union[str, SpecialKey], event_name: Optional[str] = None) -> None:
         if event_name:
             self.event_sdk.capture_event(event_name)
 
         if isinstance(text, SpecialKey):
-            keycode = self.KEYCODE_MAP.get(text)
-            if keycode:
-                internal_logger.debug(
-                    f"Pressing Detected SpecialKey in element: {text}. Keycode: {keycode}"
-                )
-                internal_logger.debug(f"Pressing SpecialKey in element: {text}")
-                driver = self._require_driver()
-                driver.press_keycode(keycode)
-            else:
-                internal_logger.warning(f"Unknown special key in element: {text}")
-                internal_logger.debug(f"Unknown special key in element, treating as text: {text}")
-                element.send_keys(utils.strip_sensitive_prefix(str(text)))
+            self._press_special_key_in(element, text)
         else:
             internal_logger.debug(f"Entering text into element: {element}")
             self._field_for(element).send_keys(utils.strip_sensitive_prefix(str(text)))
 
+    def _press_special_key_in(self, element: Any, key: SpecialKey) -> None:
+        keycode = self.KEYCODE_MAP.get(key)
+        if self._is_desktop():
+            self._press_desktop_key_in(element, key)
+        elif keycode:
+            internal_logger.debug(f"Pressing SpecialKey in element: {key}. Keycode: {keycode}")
+            self._require_driver().press_keycode(keycode)
+        else:
+            internal_logger.warning(f"Unknown special key in element: {key}")
+            internal_logger.debug(f"Unknown special key in element, treating as text: {key}")
+            element.send_keys(utils.strip_sensitive_prefix(str(key)))
+
     @_on_tv
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def clear_text_element(self, element: Any, event_name: Optional[str] = None) -> None:
         if event_name:
             self.event_sdk.capture_event(event_name)
@@ -1297,6 +1369,82 @@ class Appium(DriverInterface):
 
     def _is_ios(self) -> bool:
         return self._active_platform() == self.PLATFORM_IOS
+
+    def _is_desktop(self) -> bool:
+        return self._active_platform() in DESKTOP
+
+    def _activate_app(self, driver: WebDriver, app_id: str) -> None:
+        if not self._is_desktop():
+            driver.activate_app(app_id)
+            return
+        self._app_command(driver, "activate_app", app_id)
+
+    def _terminate_desktop(self, app_name: str) -> None:
+        try:
+            self._app_command(self.driver, "terminate_app", app_name)
+        except Exception as e:
+            raise OpticsError(Code.E0401, message=f"Failed to terminate: {app_name}", cause=e) from e
+
+    @staticmethod
+    def _app_command(driver: WebDriver, route: str, app_id: str) -> None:
+        """The client sends app commands as 'mobile:' scripts, which the Xa11y driver does not serve, so use the Appium route."""
+        name = f"optics_{route}"
+        driver.command_executor.add_command(name, "POST", f"/session/$sessionId/appium/device/{route}")
+        driver.execute(name, {"appId": app_id})
+
+    def _press_desktop_key_in(self, element: Any, key: SpecialKey) -> None:
+        """Send keys focuses the field first; a chord would go to whatever has focus."""
+        if key not in _W3C_KEYS:
+            raise OpticsError(Code.E0105, message=f"A desktop has no '{key.value}' key to press in a field.")
+        self._field_for(element).send_keys(_W3C_KEYS[key])
+
+    def _type_desktop(self, driver: WebDriver, text: str | SpecialKey) -> None:
+        """Desktop keys are chords named like SpecialKey values; text goes to the control with keyboard focus."""
+        if isinstance(text, SpecialKey):
+            driver.execute_script(_XA11Y_CHORD, {"keys": text.value})
+        else:
+            driver.execute_script(_XA11Y_TYPE_TEXT, {"text": utils.strip_sensitive_prefix(str(text))})
+
+    def _wheel_scroll(self, driver: WebDriver, direction: str, event_name: Optional[str]) -> None:
+        """Scroll the app's window with the mouse wheel; a touch swipe would select text on a desktop."""
+        bounds = self.app_area()
+        dx, dy = _SCROLL_WHEEL[direction]
+        _wheel(
+            driver, bounds["x"] + bounds["width"] / 2, bounds["y"] + bounds["height"] / 2,
+            dx * bounds["width"] * 0.6, dy * bounds["height"] * 0.6,
+        )
+        if event_name:
+            self.event_sdk.capture_event(event_name)
+
+    def app_areas(self) -> list[dict]:
+        """Where the user sees the app: the viewport, or on a desktop (whole screen) each app window, the active one first."""
+        driver = self._require_driver()
+        if not self._is_desktop():
+            return [{"x": 0, "y": 0, **driver.get_window_size()}]
+        windows = sorted((w for w in driver.execute_script(_XA11Y_LIST_WINDOWS) if w.get("bounds")), key=lambda w: not w.get("active"))
+        if not windows:
+            raise OpticsError(Code.E0401, message="The app has no window on the screen.")
+        return [w["bounds"] for w in windows]
+
+    def app_area(self) -> dict:
+        """The rect that percentages are of: the viewport, or the app's active window."""
+        return self.app_areas()[0]
+
+    def _visible_part(self, element: Any) -> dict:
+        """The part of the element in the app window that holds it; a long text view reaches far below the screen."""
+        part = largest_part({**element.location, **element.size}, self.app_areas())
+        if part is None:
+            raise OpticsError(Code.E0401, message="The element is outside every window of the app.")
+        return part
+
+    def _swipe_as_wheel(self, x: int, y: int, direction: str, length: int, event_name: Optional[str]) -> None:
+        if direction not in _SWIPE_WHEEL:
+            internal_logger.error(f"Unknown swipe direction: {direction}")
+            return
+        dx, dy = _SWIPE_WHEEL[direction]
+        _wheel(self._require_driver(), x, y, dx * length, dy * length)
+        if event_name:
+            self.event_sdk.capture_event(event_name)
 
     def _enter_text_ios(self, driver: WebDriver, text: str | SpecialKey) -> None:
         """XCUITest has no 'mobile: type' or keycodes; type into the element that has keyboard focus.
@@ -1336,7 +1484,7 @@ class Appium(DriverInterface):
             last = top
             time.sleep(_POLL_S)
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def enter_text(self, text: Union[str, SpecialKey], event_name: Optional[str] = None) -> None:
         driver = self._require_driver()
         if event_name:
@@ -1344,6 +1492,9 @@ class Appium(DriverInterface):
 
         if self._is_ios():
             self._enter_text_ios(driver, text)
+            return
+        if self._is_desktop():
+            self._type_desktop(driver, text)
             return
 
         if isinstance(text, SpecialKey):
@@ -1364,12 +1515,17 @@ class Appium(DriverInterface):
             internal_logger.debug(f"Entering {len(text_to_send)} characters")
             driver.execute_script(self.MOBILE_TYPE_COMMAND, {"text": text_to_send})
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def clear_text(self, event_name: Optional[str] = None) -> None:
         driver = self._require_driver()
         if event_name:
             self.event_sdk.capture_event(event_name)
         internal_logger.debug("Clearing text input")
+        select_all = self._require_profile().select_all_chord
+        if select_all:
+            driver.execute_script(_XA11Y_CHORD, {"keys": select_all})
+            driver.execute_script(_XA11Y_CHORD, {"keys": "backspace"})
+            return
         driver.execute_script(self.MOBILE_CLEAR)
 
     def press_keycode(self, keycode: str, event_name: Optional[str] = None) -> None:
@@ -1383,6 +1539,8 @@ class Appium(DriverInterface):
             payload = {"key": rc_key, **profile.rc_extra_payload}
             internal_logger.debug(f"{profile.rc_command} -> {payload}")
             driver.execute_script(profile.rc_command, payload)
+        elif profile.keycode_strategy == KEYCODE_CHORD:
+            driver.execute_script(_XA11Y_CHORD, {"keys": utils.strip_sensitive_prefix(str(keycode))})
         else:
             driver.press_keycode(int(utils.strip_sensitive_prefix(keycode)))
 
@@ -1433,7 +1591,7 @@ class Appium(DriverInterface):
             internal_logger.debug("press_keycode failed for a character, falling back to script typing")
             driver.execute_script(self.MOBILE_TYPE_COMMAND, {"text": ch})
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def enter_text_using_keyboard(
         self,
         text: Union[str, SpecialKey],
@@ -1444,6 +1602,8 @@ class Appium(DriverInterface):
             timestamp = self.event_sdk.get_current_time_for_events()
             if self._is_ios():
                 self._enter_text_ios(driver, text)
+            elif self._is_desktop():
+                self._type_desktop(driver, text)
             elif isinstance(text, SpecialKey):
                 self._handle_special_key_keyboard_input(driver, text)
             else:
@@ -1516,7 +1676,7 @@ class Appium(DriverInterface):
         driver.back()
 
     @_on_tv
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def get_text_element(self, element: Any) -> str:
         text = element.get_attribute("text")
         if text is None:
@@ -1528,7 +1688,7 @@ class Appium(DriverInterface):
             raise OpticsError(Code.E0401, message="Element text is None")
         return text
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def is_element_checked(self, element: Any) -> bool:
         # UiAutomator2 maps is_selected() to "selected", not "checked"; XCUITest switches report value 1/0.
         if self._is_ios():
@@ -1554,7 +1714,7 @@ class Appium(DriverInterface):
     # action keywords
 
     @_on_tv
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def press_element(self, element: Any, repeat: int, event_name: Optional[str] = None) -> None:
         timestamp = None
         for _ in range(repeat):
@@ -1567,7 +1727,7 @@ class Appium(DriverInterface):
             self.event_sdk.capture_event_with_time_input(event_name, timestamp)
             internal_logger.debug("Clicked on element: %s at %s", element, timestamp)
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def press_coordinates(self, coor_x: int, coor_y: int, event_name: Optional[str] = None) -> None:
         """
         Press an element by absolute coordinates.
@@ -1582,7 +1742,7 @@ class Appium(DriverInterface):
         internal_logger.debug(f"Pressing at coordinates: ({coor_x}, {coor_y})")
         self.tap_at_coordinates(coor_x, coor_y, event_name=event_name)
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def press_percentage_coordinates(
         self,
         percentage_x: float,
@@ -1591,17 +1751,16 @@ class Appium(DriverInterface):
         event_name: Optional[str] = None
     ) -> None:
         percentage_x, percentage_y = int(percentage_x), int(percentage_y)
-        driver = self._require_driver()
-        window_size = driver.get_window_size()
-        x = int(window_size["width"] * percentage_x / 100)
-        y = int(window_size["height"] * percentage_y / 100)
+        area = self.app_area()
+        x = area["x"] + int(area["width"] * percentage_x / 100)
+        y = area["y"] + int(area["height"] * percentage_y / 100)
         for _ in range(repeat):
             internal_logger.debug(
                 f"Pressing at percentage coordinates: ({percentage_x}%, {percentage_y}%)"
             )
             self.press_coordinates(x, y, event_name=event_name)
 
-    @supported_on(*MOBILE)
+    @supported_on(*POINTER)
     def press_xpath_using_coordinates(self, xpath: str, event_name: Optional[str] = None) -> None:
         """
         Press an element by its XPath using the bounding box coordinates.
