@@ -1283,8 +1283,11 @@ class UIHelper:
         return "Button" in tag
 
     def _is_input(self, node: etree.Element) -> bool:
-        """A field the user types into: editable, or of an input class. The compact list and the filters share it."""
-        return node.attrib.get("editable") == "true" or any(f in self._class_of(node) for f in INPUT_CLASS_FRAGMENTS)
+        """A field the user types into, shared by the compact list and the filters: an editable flag decides, else an input class."""
+        editable = node.attrib.get("editable")
+        if editable is not None:
+            return editable == "true"
+        return any(f in self._class_of(node) for f in INPUT_CLASS_FRAGMENTS)
 
     def _is_image(self, node: etree.Element) -> bool:
         """Check if element is an image."""

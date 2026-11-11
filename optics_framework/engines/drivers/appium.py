@@ -245,6 +245,22 @@ def _wheel(driver: WebDriver, x: float, y: float, dx: float, dy: float) -> None:
     ActionChains(driver).scroll_from_origin(ScrollOrigin.from_viewport(int(x), int(y)), int(dx), int(dy)).perform()
 
 
+def _part_inside(rect: dict, area: dict) -> dict | None:
+    if not (rect["x"] < area["x"] + area["width"] and rect["x"] + rect["width"] > area["x"]
+            and rect["y"] < area["y"] + area["height"] and rect["y"] + rect["height"] > area["y"]):
+        return None
+    left, top = max(rect["x"], area["x"]), max(rect["y"], area["y"])
+    right = min(rect["x"] + rect["width"], area["x"] + area["width"])
+    bottom = min(rect["y"] + rect["height"], area["y"] + area["height"])
+    return {"x": left, "y": top, "width": right - left, "height": bottom - top}
+
+
+def largest_part(rect: dict, areas: list[dict]) -> dict | None:
+    """The part of the rect inside the area that holds most of it, the first such area on a tie; None if no area holds any."""
+    parts = [part for area in areas if (part := _part_inside(rect, area)) is not None]
+    return max(parts, key=lambda part: part["width"] * part["height"], default=None)
+
+
 class Appium(DriverInterface):
     DEPENDENCY_TYPE = "driver_sources"
     NAME = "appium"
@@ -1205,8 +1221,9 @@ class Appium(DriverInterface):
     ) -> None:
         if not self._is_desktop():
             return self._swipe_element_by_touch(element, direction, swipe_length, event_name)
-        left, top, right, bottom = self._visible_rect(element)
-        return self._swipe_as_wheel((left + right) // 2, (top + bottom) // 2, str(direction).lower(), int(swipe_length), event_name)
+        part = self._visible_part(element)
+        x, y = part["x"] + part["width"] // 2, part["y"] + part["height"] // 2
+        return self._swipe_as_wheel(x, y, str(direction).lower(), int(swipe_length), event_name)
 
     def _swipe_element_by_touch(
         self, element: Any, direction: str, swipe_length: int, event_name: Optional[str]
@@ -1390,7 +1407,7 @@ class Appium(DriverInterface):
 
     def _wheel_scroll(self, driver: WebDriver, direction: str, event_name: Optional[str]) -> None:
         """Scroll the app's window with the mouse wheel; a touch swipe would select text on a desktop."""
-        bounds = self._window_bounds(driver)
+        bounds = self.app_area()
         dx, dy = _SCROLL_WHEEL[direction]
         _wheel(
             driver, bounds["x"] + bounds["width"] / 2, bounds["y"] + bounds["height"] / 2,
@@ -1399,32 +1416,26 @@ class Appium(DriverInterface):
         if event_name:
             self.event_sdk.capture_event(event_name)
 
-    @staticmethod
-    def _window_bounds(driver: WebDriver) -> dict:
-        """The bounds of the active window, else of the first window that has bounds."""
-        windows = [w for w in driver.execute_script(_XA11Y_LIST_WINDOWS) if w.get("bounds")]
-        window = next((w for w in windows if w.get("active")), windows[0] if windows else None)
-        if window is None:
-            raise OpticsError(Code.E0401, message="The app has no window to scroll.")
-        return window["bounds"]
+    def app_areas(self) -> list[dict]:
+        """Where the user sees the app: the viewport, or on a desktop (whole screen) each app window, the active one first."""
+        driver = self._require_driver()
+        if not self._is_desktop():
+            return [{"x": 0, "y": 0, **driver.get_window_size()}]
+        windows = sorted((w for w in driver.execute_script(_XA11Y_LIST_WINDOWS) if w.get("bounds")), key=lambda w: not w.get("active"))
+        if not windows:
+            raise OpticsError(Code.E0401, message="The app has no window on the screen.")
+        return [w["bounds"] for w in windows]
 
     def app_area(self) -> dict:
-        """The rect the user sees the app in: the viewport, or on a desktop (whole screen) the app's window."""
-        driver = self._require_driver()
-        if self._is_desktop():
-            return self._window_bounds(driver)
-        return {"x": 0, "y": 0, **driver.get_window_size()}
+        """The rect that percentages are of: the viewport, or the app's active window."""
+        return self.app_areas()[0]
 
-    def _visible_rect(self, element: Any) -> tuple[int, int, int, int]:
-        """The part of the element inside its window; a long text view reaches far below the screen."""
-        location, size = element.location, element.size
-        window = self.app_area()
-        return (
-            max(location["x"], window["x"]),
-            max(location["y"], window["y"]),
-            min(location["x"] + size["width"], window["x"] + window["width"]),
-            min(location["y"] + size["height"], window["y"] + window["height"]),
-        )
+    def _visible_part(self, element: Any) -> dict:
+        """The part of the element in the app window that holds it; a long text view reaches far below the screen."""
+        part = largest_part({**element.location, **element.size}, self.app_areas())
+        if part is None:
+            raise OpticsError(Code.E0401, message="The element is outside every window of the app.")
+        return part
 
     def _swipe_as_wheel(self, x: int, y: int, direction: str, length: int, event_name: Optional[str]) -> None:
         if direction not in _SWIPE_WHEEL:

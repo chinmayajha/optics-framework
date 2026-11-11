@@ -160,6 +160,7 @@ ANDROID_FOCUSABLE_LABEL = (
 @pytest.mark.parametrize("page_source, label, is_input", [
     (IOS_NOTE, "Body", True),
     (MAC_TEXTEDIT.replace('value=""', 'value="Draft"', 1), "Draft", True),
+    (MAC_TEXTEDIT.replace('value=""', 'value="Locked"', 1).replace('editable="true"', 'editable="false"'), "Locked", False),
     (ANDROID_SCREEN, "Read only", False),
     (ANDROID_FOCUSABLE_LABEL, "Row label", False),
 ])
