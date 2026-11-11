@@ -32,7 +32,8 @@ TAP_CLASS_FRAGMENTS = (
 TOGGLE_CLASS_FRAGMENTS = ("Switch", "CheckBox", "RadioButton", "ToggleButton")
 DESKTOP_CONTAINER_TAGS = frozenset({"window", "dialog"})
 INPUT_CLASS_FRAGMENTS = (
-    "EditText", "TextField", "SecureTextField", "AutoCompleteTextView", "SearchField", "text_field", "text_area",
+    "EditText", "TextField", "SecureTextField", "AutoCompleteTextView", "SearchField", "XCUIElementTypeTextView",
+    "text_field", "text_area",
 )
 # A field's text (Android) and value (iOS) hold what was typed, not its name.
 FIELD_NAME_ATTRS = ("hint", "content-desc", "label", "name", "placeholderValue")

@@ -139,3 +139,33 @@ class TestDesktopCompactActions:
 
     def test_text_inside_a_window_keeps_its_own_row(self):
         assert _by_label(_compact(MAC_CALCULATOR))["12"]["act"] == []
+
+
+IOS_NOTE = (
+    '<XCUIElementTypeApplication name="Notes" label="Notes" x="0" y="0" width="390" height="844">'
+    '<XCUIElementTypeStaticText name="Title" label="Title" x="16" y="100" width="200" height="20" '
+    'enabled="true" visible="true"/>'
+    '<XCUIElementTypeTextView value="Body" x="16" y="130" width="358" height="300" enabled="true" visible="true"/>'
+    "</XCUIElementTypeApplication>"
+)
+
+ANDROID_FOCUSABLE_LABEL = (
+    '<hierarchy rotation="0">'
+    '<android.widget.TextView class="android.widget.TextView" text="Row label" focusable="true" '
+    'clickable="true" enabled="true" bounds="[10,20][400,80]"/>'
+    "</hierarchy>"
+)
+
+
+@pytest.mark.parametrize("page_source, label, is_input", [
+    (IOS_NOTE, "Body", True),
+    (MAC_TEXTEDIT.replace('value=""', 'value="Draft"', 1), "Draft", True),
+    (ANDROID_SCREEN, "Read only", False),
+    (ANDROID_FOCUSABLE_LABEL, "Row label", False),
+])
+def test_the_inputs_filter_and_the_compact_list_agree(page_source, label, is_input):
+    inputs = {entry["text"] for entry in _helper(page_source).get_interactive_elements(["inputs"])}
+    compact = {entry["text"]: entry for entry in _compact(page_source)}
+
+    assert (label in inputs) is is_input
+    assert ("input" in compact[label]["act"]) is is_input
