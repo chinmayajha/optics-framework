@@ -348,6 +348,23 @@ def validate_project(folder: str) -> list[Check]:
     return rows
 
 
+def _desktop_problem(caps: dict) -> list[str] | None:
+    """None off a desktop; else the missing app as the driver words it, since a desktop needs no device or package."""
+    try:
+        from optics_framework.engines.drivers import appium_platforms as platforms
+    except ImportError:  # no Appium client: the Engines section names the install
+        return None
+    caps = platforms.promote_appium_options(caps)
+    profile = platforms.get_profile(caps.get("platformName") or caps.get("appium:platformName"))
+    if profile is None or not profile.app_at_start:
+        return None
+    try:
+        platforms.require_app_at_start(caps)
+    except OpticsError as e:
+        return [e.message]
+    return []
+
+
 def _source_row(driver: str, enabled_sources: set[str]) -> Check:
     matching = sorted(s for s in enabled_sources if s.startswith(f"{driver}_"))
     if matching:
@@ -360,35 +377,31 @@ def _source_row(driver: str, enabled_sources: set[str]) -> Check:
 
 def _settings_row(driver: str, cfg: dict) -> Check:
     name = f"config: {driver} settings"
-    problems: list[str] = []
-    fatal = False
-    if driver in ("appium", "selenium") and not cfg.get("url"):
-        problems.append("url is missing")
-        fatal = True
     caps = cfg.get("capabilities") or {}
-    if driver == "appium":
-        problems.extend(
-            f"{key} missing in capabilities"
-            for key in ("deviceName", "platformName")
-            if not caps.get(key))
-        # iOS launches apps by bundleId — without one XCUITest has nothing to
-        # launch, so it is a hard failure; Android keeps the historical
-        # appPackage/appActivity requirements at their existing severity.
-        if str(caps.get("platformName", "")).lower() == "ios":
-            if not caps.get("bundleId"):
-                problems.append("bundleId missing in capabilities")
-                fatal = True
-        else:
-            problems.extend(
-                f"{key} missing in capabilities"
-                for key in ("appPackage", "appActivity")
-                if not caps.get(key))
+    problems, fatal = _appium_problems(caps) if driver == "appium" else ([], False)
+    if driver in ("appium", "selenium") and not cfg.get("url"):
+        problems, fatal = ["url is missing", *problems], True
     if driver == "playwright" and not caps.get("browser"):
         problems.append("capabilities.browser missing (chromium is the default)")
     if not problems:
         return Check(name, "ok", "required settings present")
     return Check(name, "fail" if fatal else "warn", "; ".join(problems),
                  "Edit config.yaml in this project folder.")
+
+
+def _appium_problems(caps: dict) -> tuple[list[str], bool]:
+    """The missing capabilities, and whether one stops the session from starting."""
+    desktop = _desktop_problem(caps)
+    if desktop is not None:
+        return desktop, bool(desktop)
+    problems = [f"{key} missing in capabilities" for key in ("deviceName", "platformName") if not caps.get(key)]
+    # iOS launches apps by bundleId — without one XCUITest has nothing to
+    # launch, so it is a hard failure; Android keeps the historical
+    # appPackage/appActivity requirements at their existing severity.
+    if str(caps.get("platformName", "")).lower() == "ios":
+        stops = not caps.get("bundleId")
+        return problems + (["bundleId missing in capabilities"] if stops else []), stops
+    return problems + [f"{key} missing in capabilities" for key in ("appPackage", "appActivity") if not caps.get(key)], False
 
 
 # --------------------------------------------------------------------------- #
@@ -420,7 +433,7 @@ def _enabled_driver_names(folder: str) -> set[str]:
     return set(_enabled_entries(data.get("driver_sources")))
 
 
-def _mandatory_hints(rows: list[Check], drivers: set[str]) -> list[str]:
+def _mandatory_hints(rows: list[Check], drivers: set[str], android: bool = True) -> list[str]:
     """Hints of warnings on an ENABLED driver's must-have pieces.
 
     A warning for something the user never enabled (say, Playwright's browser
@@ -428,39 +441,45 @@ def _mandatory_hints(rows: list[Check], drivers: set[str]) -> list[str]:
     driver's server/device/browser blocks the first real run and gets called
     out in the closing message. Order follows the rows, deduplicated. An
     enabled driver's missing Python client blocks just as hard — the server can
-    be up and the device attached, and the run still fails on instantiation."""
-    engine_rows = _engine_row_names_by_driver()
-    required_engines = {engine_rows[driver] for driver in drivers
-                        if driver in engine_rows}
+    be up and the device attached, and the run still fails on instantiation.
+    An attached adb device is a must-have only when the project drives Android."""
+    required = _required_rows(drivers, android)
     hints: list[str] = []
     for row in rows:
-        if row.status != "warn" or not row.hint:
-            continue
-        mandatory = (
-            ("appium" in drivers
-             and (row.name == _APPIUM_SERVER
-                  or (row.name == _ADB_DEVICES
-                      and "no devices attached" in row.detail)))
-            or row.name in required_engines
-            or any(row.name in names
-                   for driver, names in _DRIVER_ROW_NAMES.items()
-                   if driver in drivers)
-        )
-        if mandatory and row.hint not in hints:
+        blocks = row.name in required and (row.name != _ADB_DEVICES or "no devices attached" in row.detail)
+        if blocks and row.status == "warn" and row.hint and row.hint not in hints:
             hints.append(row.hint)
     return hints
+
+
+def _required_rows(drivers: set[str], android: bool) -> set[str]:
+    engine_rows = _engine_row_names_by_driver()
+    required = {engine_rows[driver] for driver in drivers if driver in engine_rows}
+    required.update(name for driver, names in _DRIVER_ROW_NAMES.items() if driver in drivers for name in names)
+    if "appium" in drivers:
+        required.update((_APPIUM_SERVER, _ADB_DEVICES) if android else (_APPIUM_SERVER,))
+    return required
+
+
+def _appium_caps(folder: str) -> dict | None:
+    data, _ = _load_project_yaml(folder)
+    if data is None:
+        return None
+    cfg = _enabled_entries(data.get("driver_sources")).get("appium")
+    return cfg if isinstance(cfg, dict) else None
+
+
+def _drives_android(folder: str) -> bool:
+    """Whether the project's appium platform is Android; a project with no platformName gets the Android checks."""
+    caps = (_appium_caps(folder) or {}).get("capabilities") or {}
+    return str(caps.get("platformName") or caps.get("appium:platformName") or "android").strip().lower() == "android"
 
 
 def _appium_target(folder: str) -> tuple[str, int] | None:
     """(host, port) of the project's enabled appium url, or None when the
     project doesn't drive appium (or its url is unusable)."""
-    data, _ = _load_project_yaml(folder)
-    if data is None:
-        return None
-    for driver, cfg in _enabled_entries(data.get("driver_sources")).items():
-        if driver == "appium":
-            return _split_host_port(cfg.get("url"))
-    return None
+    cfg = _appium_caps(folder)
+    return _split_host_port(cfg.get("url")) if cfg is not None else None
 
 
 def _playwright_is_remote(folder: str | None) -> bool:
@@ -597,7 +616,8 @@ def diagnose(folder: str | None = None) -> Diagnosis:
     rows = [row for _, section_rows in sections for row in section_rows]
     drivers = _enabled_driver_names(folder) if folder else set()
     # Hints read the raw row names, so a secret that matches a name cannot hide a blocking warning.
-    blocking = [_literal(hint) for hint in _mandatory_hints(rows, drivers)]
+    android = _drives_android(folder) if folder else True
+    blocking = [_literal(hint) for hint in _mandatory_hints(rows, drivers, android)]
     sections = [(title, [_literal_check(row) for row in section_rows]) for title, section_rows in sections]
     return Diagnosis(sections, blocking, any(row.status == "fail" for row in rows))
 

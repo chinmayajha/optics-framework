@@ -46,6 +46,20 @@ IOS_ANSWERS = {
 }
 
 
+DESKTOP_CONFIG = """\
+driver_sources:
+  - appium:
+      enabled: true
+      url: 'http://127.0.0.1:4723'
+      capabilities:
+        platformName: Linux
+        automationName: Xa11y
+        {app}
+elements_sources:
+  - appium_find_element:
+      enabled: true
+"""
+
 def _render(func, *args, **kwargs):
     """Run a reporting function with a buffered console; returns (result, text)."""
     buf = io.StringIO()
@@ -348,6 +362,12 @@ class TestValidateProject:
         rows = doctor.validate_project(folder)
         assert any(r.status == "fail" and "url is missing" in r.detail for r in rows)
 
+    def test_a_rendered_desktop_config_passes_the_settings_check(self, tmp_path):
+        answers = {"platform": "desktop", "platform_name": "Mac", "app": "com.apple.TextEdit"}
+        rows = doctor.validate_project(_write_config(tmp_path, answers=answers))
+        settings = next(r for r in rows if r.name == "config: appium settings")
+        assert settings.status == "ok", settings.detail
+
     def test_ios_settings_row_ok_with_bundle_id(self, tmp_path):
         folder = _write_config(tmp_path, answers=IOS_ANSWERS)
         rows = doctor.validate_project(folder)
@@ -395,6 +415,18 @@ class TestValidateProject:
         assert settings.status == "warn"
         assert "appPackage missing in capabilities" in settings.detail
         assert "appActivity missing in capabilities" in settings.detail
+
+    @pytest.mark.parametrize("app", ["app: mousepad", "appName: mousepad", "appium:options: {app: mousepad}"])
+    def test_desktop_settings_need_only_the_app(self, tmp_path, app):
+        folder = _write_config(tmp_path, raw=DESKTOP_CONFIG.format(app=app))
+        settings = next(r for r in doctor.validate_project(folder) if r.name == "config: appium settings")
+        assert (settings.status, settings.detail) == ("ok", "required settings present")
+
+    def test_desktop_settings_fail_without_an_app(self, tmp_path):
+        folder = _write_config(tmp_path, raw=DESKTOP_CONFIG.format(app="newCommandTimeout: 60"))
+        settings = next(r for r in doctor.validate_project(folder) if r.name == "config: appium settings")
+        assert settings.status == "fail"
+        assert "'app' to launch it, or 'appName'" in settings.detail
 
     def test_missing_config_file_fails(self, tmp_path):
         rows = doctor.validate_project(str(tmp_path / "nowhere"))
@@ -626,6 +658,16 @@ class TestGatedClosingMessage:
         ]
         _, out = self._run_with_rows(tmp_path, env_rows=rows)
         assert "Good enough to start" in out
+
+    def test_no_adb_device_does_not_block_a_desktop_project(self, tmp_path):
+        rows = [Check("adb devices", "warn", "no devices attached", self.DEVICE_HINT),
+                Check("appium server", "warn", "not reachable", self.APPIUM_HINT)]
+        folder = _write_config(tmp_path, raw=DESKTOP_CONFIG.format(app="app: mousepad"))
+        with patch(f"{MODULE}.check_core", return_value=[]), patch(f"{MODULE}.check_engines", return_value=[]), \
+                patch(f"{MODULE}.check_web", return_value=[]), patch(f"{MODULE}.check_mobile", return_value=rows):
+            _, out = _render(doctor.run_doctor, folder)
+        assert f"  • {self.APPIUM_HINT}" in out
+        assert self.DEVICE_HINT not in out.split("Before your first real run:")[1]
 
     def test_counts_line_survives_gating(self, tmp_path):
         rows = [

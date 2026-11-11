@@ -19,7 +19,7 @@ from unittest.mock import patch
 import pytest
 from rich.console import Console
 
-from optics_framework.helper import doctor, quickstart
+from optics_framework.helper import doctor, quickstart, setup
 
 pytestmark = pytest.mark.white_box
 
@@ -283,6 +283,12 @@ class TestEngineInstall:
         # The domain doubles as a `setup` bundle token — the hint must stay
         # copy-pasteable.
         assert "optics setup --install mobile" in h.out.getvalue()
+
+    def test_desktop_installs_the_appium_engine(self, tmp_path):
+        with Harness(["desktop", "1", "demo", str(tmp_path)], [False]) as h:
+            h.run()
+        assert "optics setup --install appium" in h.out.getvalue()
+        assert setup.resolve_engines(["appium"])[1] == []
 
     def test_failed_install_surfaces_the_reason_and_keeps_going(self, tmp_path):
         """install_extras owns the remedy (it knows the environment); the
