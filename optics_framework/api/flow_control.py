@@ -1,4 +1,6 @@
-from typing import Optional, Any, Union, Tuple, Callable, List
+from typing import Optional, Any, Union, Tuple, Callable, List, Dict
+import itertools
+import re
 from urllib.parse import urlparse, parse_qsl
 import os.path
 from datetime import datetime, timedelta, timezone
@@ -23,6 +25,20 @@ NO_SESSION_ELEMENT_PRESENT = "Session elements is not an ElementData instance or
 ENV_SOURCE_PREFIX = "ENV:"
 HAR_HEADER = b'{"log": {"version": "1.2", "creator": {"name": "Optics Framework", "version": "1.0"}, "entries": [\n'
 HAR_TRAILER = b"\n]}}\n"
+
+
+# A leading zero marks an id or a code ("007"), not a number.
+_NUMBER = re.compile(r"[+-]?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?")
+
+
+def _typed(text: str) -> Union[int, float, str]:
+    """A session value as a condition reads it: a number when the text is one, else the text."""
+    if not _NUMBER.fullmatch(text):
+        return text
+    try:
+        return int(text)
+    except ValueError:
+        return float(text)
 
 
 def reads_environment(file_path: Any) -> bool:
@@ -429,9 +445,9 @@ class FlowControl:
         if self.modules and hasattr(self.modules, "modules") and actual_cond in self.modules.modules:
             return self._module_succeeds(actual_cond) != invert
         try:
-            resolved_cond = self._resolve_condition(actual_cond)
-            internal_logger.debug(f"[_is_condition_true] Evaluating resolved condition: {resolved_cond}")
-            return bool(self._safe_eval(resolved_cond)) != invert
+            resolved_cond, values = self._resolve_condition(actual_cond)
+            internal_logger.debug(f"[_is_condition_true] Evaluating {resolved_cond} with {values}")
+            return bool(self._safe_eval(resolved_cond, values)) != invert
         except Exception as e:
             if isinstance(e, OpticsError) and e.code is Code.E0406:
                 raise
@@ -447,22 +463,27 @@ class FlowControl:
             internal_logger.warning(f"[_is_condition_true] Module '{module}' raised error: {e}. Treating as false condition.")
             return False
 
-    def _resolve_condition(self, cond: str) -> str:
-        """Resolves variables in a condition string."""
+    def _resolve_condition(self, cond: str) -> Tuple[str, Dict[str, Any]]:
+        """The condition with each ``${var}`` as a name, and those names' values: a number when the text is one."""
         if self.session is None:
             raise OpticsError(Code.E0501, message=NO_SESSION_PRESENT)
         runner_elements = getattr(self.session, "elements", None)
         if not isinstance(runner_elements, ElementData):
             raise OpticsError(Code.E0501, message=NO_SESSION_ELEMENT_PRESENT)
+        taken = set(re.findall(r"\w+", cond))
+        aliases = (alias for alias in (f"_var_{n}" for n in itertools.count()) if alias not in taken)
+        values: Dict[str, Any] = {}
 
         def replacer(ref: utils.VarRef) -> str:
             var_name = ref.name.strip()
             value = runner_elements.get_first(var_name)
             if value is None:
                 raise OpticsError(Code.E0702, message=f"Variable '{var_name}' not found for condition resolution.")
-            return repr(str(value))
+            alias = next(aliases)
+            values[alias] = _typed(str(value))
+            return alias
 
-        return utils.substitute_vars(cond, replacer)
+        return utils.substitute_vars(cond, replacer), values
 
     @defines_variable
     @substitutes_own_vars
@@ -880,14 +901,14 @@ class FlowControl:
 
         return self._safe_eval(utils.substitute_vars(param2, replace_var))
 
-    def _safe_eval(self, text: str) -> Any:
-        """Evaluate ``text`` with session variables as names, through the restricted evaluator."""
+    def _safe_eval(self, text: str, values: Optional[Dict[str, Any]] = None) -> Any:
+        """Evaluate ``text`` with session variables and ``values`` as names, through the restricted evaluator."""
         if self.session is None:
             raise OpticsError(Code.E0501, message=NO_SESSION_PRESENT)
         runner_elements = getattr(self.session, "elements", None)
         if not isinstance(runner_elements, ElementData):
             raise OpticsError(Code.E0702, message=NO_SESSION_ELEMENT_PRESENT)
-        return expression.evaluate(text, {k: v[0] for k, v in runner_elements.elements.items() if v})
+        return expression.evaluate(text, {**{k: v[0] for k, v in runner_elements.elements.items() if v}, **(values or {})})
 
     def _detect_date_format(self, date_str: str) -> str:
         """Detect the format of the input date string."""

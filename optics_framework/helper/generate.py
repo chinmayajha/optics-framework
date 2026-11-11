@@ -14,6 +14,7 @@ import json
 
 from optics_framework.common import safe_fs
 from optics_framework.common.config_handler import load_project_yaml
+from optics_framework.common.runner.data_reader import CSVDataReader as RunnerCSVReader, is_elements_header
 from optics_framework.common.utils import unescape_csv_value
 
 _KWARG = re.compile(r"^([A-Za-z_]\w*)=(.*)$", re.DOTALL)
@@ -204,16 +205,11 @@ class CSVDataReader(DataReader):
         return unescape_csv_value(str(value).strip())
 
     def read_elements(self, source: str) -> Elements:
-        df = pd.read_csv(source)
-        def _ensure_str_and_unescape(val):  # ensures type checker sees str passed to unescape_csv_value
-            return unescape_csv_value(str(val).strip())
-
-        return dict(
-            zip(
-                df["Element_Name"].str.strip(),
-                df["Element_ID"].fillna("").str.strip().map(_ensure_str_and_unescape),
-            )
-        )
+        """Each element's first locator: a generated script has no fallback, as `${name}` inside a value has none."""
+        return {
+            name: next(iter(ids), "")
+            for name, ids in RunnerCSVReader().read_elements(source).items()
+        }
 
     def read_config(self, source: str) -> Config:
         return load_project_yaml(source) or {}
@@ -658,7 +654,7 @@ def _detect_csv_type(file_path: str) -> Optional[Tuple[str, str]]:
             return "csv", "test_cases"
         if "module_name" in headers and "module_step" in headers:
             return "csv", "modules"
-        if "element_name" in headers and "element_id" in headers:
+        if is_elements_header(set(headers)):
             return "csv", "elements"
     except Exception as e:
         logger.exception(f"Error reading CSV {file_path}: {e}")

@@ -164,6 +164,17 @@ class TestCSVDataReader:
             "login_button": "loginBtn",
         }
 
+    def test_elements_with_only_named_locator_columns_give_their_first_locator(self, tmp_path):
+        _write(tmp_path, "test_cases.csv", CSV_TEST_CASES)
+        _write(tmp_path, "modules.csv", CSV_MODULES)
+        _write(tmp_path, "elements.csv", "Element_Name,Element_ID_xpath,Element_ID_text\n"
+                                         "username_field,//input[@id='user'],User\nlogin_button,,Login\n")
+        _, _, elements_file, _ = find_files(str(tmp_path))
+        assert CSVDataReader().read_elements(elements_file) == {
+            "username_field": "//input[@id='user']",
+            "login_button": "Login",
+        }
+
     def test_read_modules_unescapes_backslash_sequences(self, tmp_path):
         # A one-line CSV param carrying an escaped newline must round-trip to a real
         # newline; an escaped backslash must stay a literal backslash (not a newline).

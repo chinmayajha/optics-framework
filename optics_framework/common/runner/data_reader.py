@@ -21,6 +21,22 @@ _TOKEN = re.compile(r'''(?:[^\s"']|"[^"]*"|'[^']*')+''')
 _WRAPPED = re.compile(r'''^(?P<q>["'])(?P<body>.*)(?P=q)$''', re.S)
 
 
+def is_element_id_column(header: str) -> bool:
+    """Whether a CSV header names a locator column of an elements file: Element_ID, Element_ID_xpath, ..."""
+    return re.sub(r"\s+", "", header).lower().startswith("element_id")
+
+
+def is_elements_header(headers: Set[str]) -> bool:
+    """Whether CSV headers are those of an elements file: Element_Name and at least one Element_ID* column."""
+    return "element_name" in {h.strip().lower() for h in headers} and any(map(is_element_id_column, headers))
+
+
+def _element_ids(row: dict) -> List[str]:
+    """The non-empty locators of an elements row, in column order."""
+    values = (str(value).strip() for key, value in row.items() if key is not None and is_element_id_column(key) and value)
+    return [unescape_csv_value(value) for value in values if value]
+
+
 def _unbalanced_quote(step: str) -> bool:
     """Whether the token pattern would skip a non-whitespace character, which only an
     unpaired quote makes it do."""
@@ -420,15 +436,7 @@ class CSVDataReader(DataReader):
         elements = {}
         for row in rows:
             element_name = row.get("element_name", "").strip()
-            # Support multiple element IDs for fallback: look for all keys starting with "Element_ID"
-            element_ids = [
-                unescape_csv_value(str(row[key]).strip())
-                for key in row
-                if key is not None
-                and re.sub(r"\s+", "", key).lower().startswith("element_id")
-                and row[key]
-                and str(row[key]).strip()
-            ]
+            element_ids = _element_ids(row)
             if element_name and element_ids:
                 if element_name not in elements:
                     elements[element_name] = []

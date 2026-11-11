@@ -245,6 +245,15 @@ class TestExpressionCondition:
         assert flow_control.condition('${x} == "yes"', "modA") is None
         assert run.calls == []
 
+    @pytest.mark.parametrize("cond", ["${count} == 3", "${count} < 10", "${ratio} > 0.5", '${code} == "007"'])
+    def test_a_stored_number_compares_as_a_number(self, flow_control, cond):
+        run = _module_runner({"modA": ["ran:modA"]})
+        _register(flow_control, run)
+        flow_control.evaluate("${count}", "1 + 2")
+        flow_control.session.elements.add_element("ratio", "0.75")
+        flow_control.session.elements.add_element("code", "007")
+        assert flow_control.condition(cond, "modA") == ["ran:modA"]
+
     def test_invert_prefix_flips_expression(self, flow_control):
         run = _module_runner({"modA": ["ran:modA"]})
         _register(flow_control, run)
