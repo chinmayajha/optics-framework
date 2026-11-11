@@ -405,7 +405,7 @@ class Verifier:
                 "bounds": [bounds.get("x1"), bounds.get("y1"), bounds.get("x2"), bounds.get("y2")],
                 "act": el.get("act") or [],
             }
-            rid = extra.get("resource-id")
+            rid = extra.get("resource-id", extra.get("id"))
             if rid:
                 entry["rid"] = rid
             if el.get("loc"):

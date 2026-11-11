@@ -30,7 +30,11 @@ TAP_CLASS_FRAGMENTS = (
     "XCUIElementTypeKey",
 )
 TOGGLE_CLASS_FRAGMENTS = ("Switch", "CheckBox", "RadioButton", "ToggleButton")
-INPUT_CLASS_FRAGMENTS = ("EditText", "TextField", "SecureTextField", "AutoCompleteTextView", "SearchField")
+DESKTOP_CONTAINER_TAGS = frozenset({"window", "dialog"})
+INPUT_CLASS_FRAGMENTS = (
+    "EditText", "TextField", "SecureTextField", "AutoCompleteTextView", "SearchField", "XCUIElementTypeTextView",
+    "text_field", "text_area",
+)
 # A field's text (Android) and value (iOS) hold what was typed, not its name.
 FIELD_NAME_ATTRS = ("hint", "content-desc", "label", "name", "placeholderValue")
 SCROLL_CLASS_FRAGMENTS = (
@@ -816,7 +820,7 @@ class UIHelper:
             actions.append("long")
         if attrs.get("checkable") == "true" or any(f in cls for f in TOGGLE_CLASS_FRAGMENTS):
             actions.append("toggle")
-        if attrs.get("editable") == "true" or any(f in cls for f in INPUT_CLASS_FRAGMENTS):
+        if self._is_input(node):
             actions.append("input")
         if attrs.get("scrollable") == "true" or any(f in cls for f in SCROLL_CLASS_FRAGMENTS):
             actions.append("scroll")
@@ -858,8 +862,9 @@ class UIHelper:
         return " ".join(dict.fromkeys(parts))[:COMPACT_LABEL_MAX_CHARS]
 
     def _folds_text(self, node: etree.Element) -> bool:
-        # A clickable/toggle/input container folds its text; a pure scroll container does not.
-        return self._is_actionable(node) and self._element_actions(node) != ["scroll"]
+        # A button's child texts are its name, so they fold into its label. A scroll container holds many items, and a
+        # desktop window is clickable but holds the whole app, so folding there would hide every text on the screen.
+        return node.tag not in DESKTOP_CONTAINER_TAGS and self._is_actionable(node) and self._element_actions(node) != ["scroll"]
 
     def _has_folding_ancestor(self, node: etree.Element) -> bool:
         parent = node.getparent()
@@ -874,6 +879,8 @@ class UIHelper:
         rid = node.attrib.get("resource-id")
         if rid and not _obfuscated_id(rid):
             extra["resource-id"] = rid
+        elif node.attrib.get("id"):
+            extra["id"] = node.attrib["id"]
         if node.attrib.get("password") == "true":
             extra["password"] = True
         if "input" in actions:
@@ -1276,15 +1283,11 @@ class UIHelper:
         return "Button" in tag
 
     def _is_input(self, node: etree.Element) -> bool:
-        """Check if element is an input/text field."""
-        tag = node.tag or ""
-        # Android: EditText, TextView (when editable/focusable)
-        # iOS: XCUIElementTypeTextField, XCUIElementTypeSecureTextField, XCUIElementTypeTextView
-        if any(t in tag for t in ["TextField", "EditText", "SecureTextField"]):
-            return True
-        if "TextView" in tag and node.attrib.get("focusable") == "true":
-            return True
-        return False
+        """A field the user types into, shared by the compact list and the filters: an editable flag decides, else an input class."""
+        editable = node.attrib.get("editable")
+        if editable is not None:
+            return editable == "true"
+        return any(f in self._class_of(node) for f in INPUT_CLASS_FRAGMENTS)
 
     def _is_image(self, node: etree.Element) -> bool:
         """Check if element is an image."""

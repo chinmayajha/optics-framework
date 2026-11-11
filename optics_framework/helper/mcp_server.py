@@ -685,6 +685,20 @@ def _session_config(
     )
 
 
+def _session_caps(driver: str, app: str, capabilities: dict[str, Any]) -> dict[str, Any]:
+    """A platform that attaches when the session starts takes the app in the capabilities, unless they name one to attach to."""
+    if driver != "appium":
+        return capabilities
+    from optics_framework.engines.drivers.appium_platforms import get_profile, promote_appium_options
+
+    capabilities = promote_appium_options(capabilities)
+    if not app or capabilities.get("appName") or capabilities.get("appium:appName"):
+        return capabilities
+
+    profile = get_profile(capabilities.get("platformName") or capabilities.get("appium:platformName"))
+    return {"app": app} | capabilities if profile is not None and profile.app_at_start else capabilities
+
+
 async def _start(driver: str, app: str, config: expose_api.SessionConfig) -> Any:
     """Create the session, then open ``app`` when one is given."""
     try:
@@ -813,7 +827,7 @@ def build_server(toolset: str | None = None) -> "FastMCP":
         strict_element_match: Annotated[bool, Field(description="No fuzzy text matches.")] = False,
     ) -> Any:
         config = _session_config(
-            driver, url, capabilities, elements_sources, text_detection=list(text_detection),
+            driver, url, _session_caps(driver, app, capabilities), elements_sources, text_detection=list(text_detection),
             image_detection=list(image_detection), project_path=project_path or None, ai_self_heal=ai_self_heal,
             llm_provider=llm_provider or None, llm_model=llm_model or None, strict_element_match=strict_element_match,
         )
@@ -870,7 +884,7 @@ def build_server(toolset: str | None = None) -> "FastMCP":
         return await _act(action, screen, session_id)
 
     async def press_key(
-        key: Annotated[str, Field(description="back, a key name such as Enter or Escape, or an Android KeyEvent number.")],
+        key: Annotated[str, Field(description="back, a key name such as Enter or Escape, a desktop chord such as cmd+s, or an Android KeyEvent number.")],
         expect_present: _PRESENT = [], expect_absent: _ABSENT = [], screen: _SCREEN = "diff",  # noqa: B006
         session_id: _SID = "",
     ) -> Any:
